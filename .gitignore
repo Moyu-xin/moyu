@@ -1,0 +1,68 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+build/
+dist/
+wheels/
+*.egg-info
+web_dist/
+# Virtual environments
+.venv/
+.idea/
+.vscode/
+data/
+config.json
+config.json.bak
+config.json.*.bak
+edit/
+
+docker-compose-local.yml
+
+.claude/settings.local.json
+
+# Environment variables
+.env
+.env.local
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+
+# Git cache
+git_cache/
+
+# Local dependency cache
+.deps/
+
+# Runtime logs
+logs/
+runtime/
+*.log
+
+# Temporary test files
+tmp_*.json
+*.bak
+*.tmp
+
+# Local audit, backup, and capture artifacts
+backups/
+.mimocode/
+PROJECT_AUDIT_REPORT_*.md
+capture_proxy.py
+check_mbox.py
+parse_capture.py
+parse_har.py
+protocol_flow.md
+tampermonkey_capture.js
+*.har
+*.pcap
+*.pcapng
+
+# Debug/test output directories
+loginwithpassword_*/
+logwithemailverifycode_*/
+test_batch_output/

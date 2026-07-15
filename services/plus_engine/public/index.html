@@ -1,0 +1,1528 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>批量矩阵测试</title>
+    <style>
+      :root {
+        --bg: #eef3f8;
+        --panel: #ffffff;
+        --line: #d8e0ec;
+        --text: #172033;
+        --muted: #64748b;
+        --muted-strong: #475569;
+        --blue: #2563eb;
+        --blue-dark: #1d4ed8;
+        --blue-soft: #eaf1ff;
+        --green: #15803d;
+        --green-soft: #ecfdf3;
+        --red: #b91c1c;
+        --red-soft: #fef2f2;
+        --yellow-soft: #fffbeb;
+        --shadow: 0 18px 50px rgba(15, 23, 42, 0.12);
+        --radius: 8px;
+        font-family: Inter, "Segoe UI", Arial, sans-serif;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        background: var(--bg);
+        color: var(--text);
+      }
+
+      .app {
+        display: grid;
+        grid-template-rows: auto 1fr;
+        min-height: 100vh;
+      }
+
+      header {
+        position: sticky;
+        top: 0;
+        z-index: 5;
+        border-bottom: 1px solid var(--line);
+        background: #fff;
+      }
+
+      .topbar {
+        display: grid;
+        grid-template-columns: minmax(168px, 0.8fr) repeat(6, minmax(118px, 1fr)) minmax(150px, 0.78fr) minmax(150px, 0.78fr) auto;
+        gap: 10px;
+        align-items: end;
+        padding: 12px 14px;
+      }
+
+      .brand {
+        align-self: stretch;
+        display: grid;
+        align-content: center;
+        gap: 3px;
+        min-width: 0;
+      }
+
+      .brand-title {
+        font-size: 16px;
+        font-weight: 900;
+        letter-spacing: 0;
+      }
+
+      .brand-subtitle {
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .field {
+        display: grid;
+        gap: 5px;
+        min-width: 0;
+      }
+
+      label {
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 700;
+      }
+
+      input,
+      textarea {
+        width: 100%;
+        min-height: 34px;
+        padding: 7px 9px;
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: #fff;
+        color: var(--text);
+        font: inherit;
+        font-size: 12px;
+        outline: none;
+      }
+
+      textarea {
+        min-height: 34px;
+        max-height: 86px;
+        resize: vertical;
+      }
+
+      input:focus,
+      textarea:focus {
+        border-color: var(--blue);
+        box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
+      }
+
+      .controls {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+      }
+
+      .check-field {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        min-height: 34px;
+        padding: 7px 9px;
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: #f8fafc;
+        color: var(--muted-strong);
+        font-size: 12px;
+        font-weight: 800;
+      }
+
+      .check-field input {
+        width: 15px;
+        min-height: 15px;
+        margin: 0;
+      }
+
+      button {
+        min-height: 34px;
+        padding: 0 14px;
+        border: 1px solid var(--blue);
+        border-radius: var(--radius);
+        background: var(--blue);
+        color: #fff;
+        font: inherit;
+        font-size: 12px;
+        font-weight: 800;
+        cursor: pointer;
+        white-space: nowrap;
+      }
+
+      button:hover:not(:disabled) {
+        background: var(--blue-dark);
+      }
+
+      button.secondary {
+        border-color: var(--line);
+        background: #fff;
+        color: var(--text);
+      }
+
+      button:disabled {
+        cursor: not-allowed;
+        opacity: 0.55;
+      }
+
+      .summary {
+        display: grid;
+        grid-template-columns: repeat(6, minmax(92px, auto));
+        gap: 8px;
+        padding: 8px 14px 12px;
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .pill {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 26px;
+        padding: 4px 8px;
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: #f8fafc;
+        font-weight: 700;
+      }
+
+      .pill.active {
+        border-color: #bfdbfe;
+        background: var(--blue-soft);
+        color: #1e40af;
+      }
+
+      main {
+        min-height: 0;
+        padding: 12px 14px 14px;
+      }
+
+      .matrix {
+        overflow: auto;
+        max-height: calc(100vh - 148px);
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: var(--panel);
+        box-shadow: var(--shadow);
+      }
+
+      .matrix-head,
+      .matrix-row {
+        display: grid;
+        grid-template-columns: 86px 108px 82px minmax(220px, 1fr) minmax(160px, 0.7fr) minmax(118px, 0.52fr) minmax(200px, 0.78fr);
+        gap: 0;
+        align-items: stretch;
+        min-width: 1010px;
+      }
+
+      .matrix-head {
+        position: sticky;
+        top: 0;
+        z-index: 2;
+        border-bottom: 1px solid var(--line);
+        background: #eef4ff;
+        color: #1e3a8a;
+        font-size: 12px;
+        font-weight: 900;
+      }
+
+      .matrix-row {
+        border-bottom: 1px solid #edf2f7;
+        color: var(--text);
+        font-size: 12px;
+        transition: background 160ms ease, box-shadow 160ms ease;
+      }
+
+      .matrix-row:last-child {
+        border-bottom: none;
+      }
+
+      .cell {
+        min-width: 0;
+        padding: 7px 8px;
+        border-right: 1px solid #edf2f7;
+        overflow-wrap: anywhere;
+      }
+
+      .cell:last-child {
+        border-right: none;
+      }
+
+      .country {
+        font-weight: 900;
+      }
+
+      .worker-tag {
+        display: inline-flex;
+        align-items: center;
+        min-height: 19px;
+        margin-top: 4px;
+        padding: 1px 6px;
+        border-radius: 999px;
+        background: #eef2ff;
+        color: #3730a3;
+        font-size: 11px;
+        font-weight: 800;
+      }
+
+      .checkout {
+        color: #334155;
+        font-weight: 800;
+      }
+
+      .waiting {
+        background: #fff;
+      }
+
+      .running {
+        background: var(--yellow-soft);
+        box-shadow: inset 3px 0 0 #f59e0b;
+      }
+
+      .success {
+        background: var(--green-soft);
+        box-shadow: inset 3px 0 0 var(--green);
+      }
+
+      .fail {
+        background: var(--red-soft);
+        box-shadow: inset 3px 0 0 var(--red);
+      }
+
+      .status-ok {
+        color: var(--green);
+        font-weight: 900;
+      }
+
+      .status-fail {
+        color: var(--red);
+        font-weight: 900;
+      }
+
+      .status-run {
+        color: #a16207;
+        font-weight: 900;
+      }
+
+      .note {
+        color: var(--muted);
+        font-size: 11px;
+      }
+
+      .preview {
+        padding: 0 14px 10px;
+        color: var(--muted);
+        font-size: 12px;
+        overflow-wrap: anywhere;
+      }
+
+      .preview.error {
+        color: var(--red);
+      }
+
+      .log-panel {
+        margin-top: 12px;
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: #0f172a;
+        color: #dbeafe;
+        box-shadow: var(--shadow);
+        overflow: hidden;
+      }
+
+      .log-title {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        padding: 8px 10px;
+        border-bottom: 1px solid rgba(219, 234, 254, 0.16);
+        color: #bfdbfe;
+        font-size: 12px;
+        font-weight: 900;
+      }
+
+      .event-log {
+        max-height: 220px;
+        overflow: auto;
+        padding: 8px 10px;
+        font-family: "Cascadia Mono", Consolas, monospace;
+        font-size: 11px;
+        line-height: 1.55;
+      }
+
+      .log-line {
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+      }
+
+      .modal-backdrop {
+        position: fixed;
+        inset: 0;
+        z-index: 20;
+        display: none;
+        place-items: center;
+        padding: 18px;
+        background: rgba(15, 23, 42, 0.42);
+      }
+
+      .modal-backdrop.show {
+        display: grid;
+      }
+
+      .modal {
+        width: min(680px, 100%);
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        background: #fff;
+        box-shadow: var(--shadow);
+      }
+
+      .modal-header,
+      .modal-footer {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 14px 16px;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .modal-footer {
+        border-top: 1px solid var(--line);
+        border-bottom: none;
+      }
+
+      .modal-title {
+        font-size: 15px;
+        font-weight: 900;
+      }
+
+      .modal-body {
+        display: grid;
+        gap: 10px;
+        padding: 14px 16px;
+      }
+
+      .token-textarea {
+        min-height: 176px;
+        font-family: "Cascadia Mono", Consolas, monospace;
+        line-height: 1.45;
+      }
+
+      .modal-error {
+        min-height: 18px;
+        color: var(--red);
+        font-size: 12px;
+        font-weight: 700;
+      }
+
+      @media (max-width: 980px) {
+        .topbar {
+          grid-template-columns: 1fr 1fr;
+        }
+
+        .brand {
+          grid-column: 1 / -1;
+        }
+
+        .controls {
+          grid-column: 1 / -1;
+        }
+
+        .summary {
+          grid-template-columns: repeat(3, minmax(92px, auto));
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="app">
+      <header>
+        <div class="topbar">
+          <div class="brand">
+            <div class="brand-title">批量矩阵测试</div>
+            <div class="brand-subtitle">首个 token 顶部输入，缺少时弹窗补齐，最多 3 并发</div>
+          </div>
+          <div class="field">
+            <label for="primaryAccessToken">Access token</label>
+            <input id="primaryAccessToken" placeholder="第一个 token" autocomplete="off" />
+          </div>
+          <div class="field">
+            <label for="jpCheckoutProxy">checkout JP 代理</label>
+            <input id="jpCheckoutProxy" placeholder="user:pass-JP@host:port" />
+          </div>
+          <div class="field">
+            <label for="thCheckoutProxy">checkout TH 代理</label>
+            <input id="thCheckoutProxy" placeholder="user:pass-TH@host:port" />
+          </div>
+          <div class="field">
+            <label for="brCheckoutProxy">checkout BR 代理</label>
+            <input id="brCheckoutProxy" placeholder="user:pass-BR@host:port" />
+          </div>
+          <div class="field">
+            <label for="globalProxyTemplate">全球混播代理模板（注意提取IP为全球动态）</label>
+            <input id="globalProxyTemplate" placeholder="user:pass-global@host:port" />
+          </div>
+          <div class="field">
+            <label for="concurrencyInput">并发数</label>
+            <input id="concurrencyInput" type="number" min="1" max="3" value="3" />
+          </div>
+          <div class="field">
+            <label for="providerRetryLimitInput">重复提链上限</label>
+            <input id="providerRetryLimitInput" type="number" min="1" max="20" value="5" />
+          </div>
+          <label class="check-field" for="providerSameAsTarget" hidden>
+            <input id="providerSameAsTarget" type="checkbox" />
+            provider IP为当前任务国家
+          </label>
+          <label class="check-field" for="approveSameAsCheckout" hidden>
+            <input id="approveSameAsCheckout" type="checkbox" checked />
+            approve出口IP与checkout一致
+          </label>
+          <div class="note">左侧账单国家轮询 US/DE/FR/IT/ES/NL/CA/AU；右侧 checkout/provider/approve 出口轮询 JP/TH/BR；PM billing address 跟随右侧出口国家。</div>
+          <div class="controls">
+            <button id="startBtn" type="button">开始</button>
+            <button id="stopBtn" class="secondary" type="button" disabled>停止</button>
+          </div>
+        </div>
+        <div id="templatePreview" class="preview">等待代理模板。</div>
+        <div class="summary">
+          <span class="pill" id="totalCount">总数 0</span>
+          <span class="pill" id="doneCount">完成 0</span>
+          <span class="pill" id="successCount">成功 0</span>
+          <span class="pill" id="failCount">失败 0</span>
+          <span class="pill" id="zeroCount">0元成功 0</span>
+          <span class="pill" id="saveState">未保存</span>
+        </div>
+      </header>
+
+      <main>
+        <section class="matrix" aria-live="polite">
+          <div class="matrix-head">
+            <div class="cell">当前国家</div>
+            <div class="cell">checkout IP</div>
+            <div class="cell">提链次数</div>
+            <div class="cell">实时进度</div>
+            <div class="cell">实时代理IP</div>
+            <div class="cell">当前金额</div>
+            <div class="cell">成功/失败</div>
+          </div>
+          <div id="matrixBody"></div>
+        </section>
+        <section class="log-panel" aria-live="polite">
+          <div class="log-title">
+            <span>实时日志</span>
+            <span id="logCount">0 条</span>
+          </div>
+          <div id="eventLog" class="event-log"></div>
+        </section>
+      </main>
+    </div>
+
+    <div id="tokenModal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="tokenModalTitle">
+      <div class="modal">
+        <div class="modal-header">
+          <div>
+            <div id="tokenModalTitle" class="modal-title">补充 Access Token</div>
+            <div id="tokenModalHint" class="note">每行一个 token。缺少的 token 补齐后才会启动。</div>
+          </div>
+          <button id="tokenCancelBtn" class="secondary" type="button">取消</button>
+        </div>
+        <div class="modal-body">
+          <label for="tokenListInput">补充 Access Token</label>
+          <textarea id="tokenListInput" class="token-textarea" placeholder="token_2&#10;token_3"></textarea>
+          <div id="tokenModalError" class="modal-error"></div>
+        </div>
+        <div class="modal-footer">
+          <span id="tokenModalCount" class="note">等待输入。</span>
+          <div class="controls">
+            <button id="tokenConfirmBtn" type="button">开始执行</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      const OPENAI_COUNTRIES = ["US", "DE", "FR", "IT", "ES", "NL", "CA", "AU"];
+      const CHECKOUT_COUNTRIES = ["JP", "TH", "BR"];
+      const FORCE_NETWORK_STAGES_TO_CHECKOUT = true;
+      const RESULT_FILENAME = "latest_full_country_zero_amount_matrix.json";
+      const NETWORK_TASK_RETRY_ATTEMPTS = 3;
+      const NETWORK_RETRY_DELAY_MS = 5000;
+      const MAX_MATRIX_CONCURRENCY = 3;
+      const DEFAULT_PROVIDER_RETRY_LIMIT = 5;
+      const MAX_PROVIDER_RETRY_LIMIT = 20;
+      const EXPECTED_MATRIX_TOTAL = OPENAI_COUNTRIES.length * CHECKOUT_COUNTRIES.length;
+      const MAX_TASK_EVENTS = 50;
+      const PRECISE_BILLING_COUNTRIES = new Set(["US", "BR", "AU", "DE", "TH", "NZ", "CA", "JP"]);
+      const $ = (id) => document.getElementById(id);
+
+      let tasks = [];
+      let abortRequested = false;
+      let active = false;
+      let localRunKey = "";
+      let runConcurrency = MAX_MATRIX_CONCURRENCY;
+      let runTokens = [];
+      let pendingTokenResolver = null;
+      let tokenModalRequiredCount = 0;
+      let tokenModalExistingTokens = [];
+
+      function escapeHtml(value) {
+        return String(value ?? "")
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;")
+          .replace(/"/g, "&quot;")
+          .replace(/'/g, "&#39;");
+      }
+
+      function sleep(ms) {
+        return new Promise((resolve) => setTimeout(resolve, ms));
+      }
+
+      function normalizeProxyInput(input) {
+        let value = String(input || "")
+          .trim()
+          .replace(/\uFF20/g, "@")
+          .replace(/[\u2010-\u2015\u2212\uFE63\uFF0D]/g, "-")
+          .replace(/[\u200B-\u200D\uFEFF]/g, "")
+          .replace(/\s*@\s*/g, "@");
+        value = value.replace(/^['"]|['"]$/g, "").trim();
+
+        const envMatch = value.match(/^(?:export\s+|set\s+)?(?:HTTP_PROXY|HTTPS_PROXY|ALL_PROXY|http_proxy|https_proxy|all_proxy)\s*=\s*(.+)$/i);
+        if (envMatch) return normalizeProxyInput(envMatch[1]);
+
+        const cliMatch = value.match(/(?:^|\s)(?:--proxy|-x)\s+("[^"]+"|'[^']+'|\S+)/i);
+        if (cliMatch) return normalizeProxyInput(cliMatch[1]);
+
+        return value;
+      }
+
+      function encodeProxyPart(value) {
+        return encodeURIComponent(String(value || "")).replace(/%2D/gi, "-").replace(/%2E/gi, ".").replace(/%5F/gi, "_").replace(/%7E/gi, "~");
+      }
+
+      function decodeProxyPart(value) {
+        try {
+          return decodeURIComponent(String(value || ""));
+        } catch (_) {
+          return String(value || "");
+        }
+      }
+
+      function hostWithPort(host, port) {
+        const cleanHost = String(host || "").trim();
+        const cleanPort = String(port || "").trim();
+        if (!cleanHost) throw new Error("代理格式错误：缺少 host。");
+        if (!/^\d{1,5}$/.test(cleanPort)) throw new Error("代理格式错误：端口不是数字。");
+        return cleanHost.includes(":") && !cleanHost.startsWith("[") ? `[${cleanHost}]:${cleanPort}` : `${cleanHost}:${cleanPort}`;
+      }
+
+      function buildProxyUrl(proxy) {
+        const scheme = proxy.scheme || "http";
+        const auth = proxy.username ? `${encodeProxyPart(proxy.username)}:${encodeProxyPart(proxy.password || "")}@` : "";
+        return `${scheme}://${auth}${hostWithPort(proxy.host, proxy.port)}`;
+      }
+
+      function parseProxyInput(input) {
+        const value = normalizeProxyInput(input);
+        if (!value) throw new Error("代理不能为空。");
+
+        const schemeMatch = value.match(/^([a-z][a-z0-9+.-]*):\/\//i);
+        if (schemeMatch) {
+          const scheme = schemeMatch[1].toLowerCase().replace(/^scok5$|^sock5$|^socks$/, "socks5");
+          if (!["http", "https", "socks4", "socks5", "socks5h"].includes(scheme)) {
+            throw new Error("代理格式错误：只支持 http/https/socks4/socks5/socks5h。");
+          }
+          let parsed;
+          try {
+            parsed = new URL(value);
+          } catch (_) {
+            throw new Error("代理格式错误：URL 无法解析，请检查认证信息和 host:port。");
+          }
+          if (!parsed.hostname || !parsed.port) throw new Error("代理格式错误：URL 缺少 host:port。");
+          return {
+            scheme,
+            username: decodeProxyPart(parsed.username),
+            password: decodeProxyPart(parsed.password),
+            host: parsed.hostname,
+            port: parsed.port,
+          };
+        }
+
+        if (value.includes("@")) {
+          return parseProxyInput(`http://${value}`);
+        }
+
+        const parts = value.split(":");
+        if (parts.length >= 4 && /^\d+$/.test(parts[1])) {
+          return {
+            scheme: "http",
+            host: parts[0],
+            port: parts[1],
+            username: parts[2],
+            password: parts.slice(3).join(":"),
+          };
+        }
+        if (parts.length >= 4 && /^\d+$/.test(parts[parts.length - 1])) {
+          return {
+            scheme: "http",
+            username: parts[0],
+            password: parts[1],
+            host: parts.slice(2, -1).join(":"),
+            port: parts[parts.length - 1],
+          };
+        }
+        if (parts.length === 2 && /^\d+$/.test(parts[1])) {
+          return { scheme: "http", username: "", password: "", host: parts[0], port: parts[1] };
+        }
+        throw new Error("代理格式错误：未找到可识别的 host:port 或认证格式。");
+      }
+
+      function replaceProxyCountry(proxy, country) {
+        const code = String(country || "").trim().toUpperCase();
+        if (!code) return { proxy, dynamic: false };
+        const username = String(proxy.username || "");
+        const nextUsername = username.replace(/region-[A-Z]{2}/i, `region-${code}`);
+        const password = String(proxy.password || "");
+        const nextPassword = password.replace(/-(global|[A-Z]{2})$/i, `-${code}`);
+        return {
+          proxy: { ...proxy, username: nextUsername, password: nextPassword },
+          dynamic: nextUsername !== username || nextPassword !== password,
+        };
+      }
+
+      function proxyForCountry(template, country) {
+        const parsed = parseProxyInput(template);
+        const replaced = replaceProxyCountry(parsed, country);
+        return buildProxyUrl(replaced.proxy);
+      }
+
+      function proxyTemplateInfo(template, country = "US") {
+        const parsed = parseProxyInput(template);
+        const replaced = replaceProxyCountry(parsed, country);
+        return {
+          dynamic: replaced.dynamic,
+          example: buildProxyUrl(replaced.proxy),
+        };
+      }
+
+      function proxyFormatForCountry(country) {
+        return `user:pass-${String(country || "XX").toUpperCase()}@host:port`;
+      }
+
+      function amountText(task) {
+        const amount = String(task.stripe_amount ?? "").trim();
+        const source = String(task.stripe_amount_source || "").trim();
+        if (!amount && /missing|unknown/.test(source)) return "金额未知";
+        if (!amount) return "等待 Stripe";
+        if (amount === "0") return "当前优惠金额0元";
+        return `当前金额 ${amount}${task.currency ? ` ${task.currency}` : ""}`;
+      }
+
+      function proxyIpText(task) {
+        if (!task.current_proxy_ip) return "等待检测";
+        const code = task.current_proxy_country_code || "未知";
+        return `当前国家 ip：${task.current_proxy_ip} / ${code}`;
+      }
+
+      function chineseStatusSummary(task) {
+        const text = String(task.detail || task.stage || "");
+        if (task.status === "成功") {
+          if (String(task.stripe_amount || "") === "0") return "中文解析：金额为0，已成功提取长链接。";
+          return "中文解析：任务成功。";
+        }
+        if (/stripe_amount_unknown/.test(text)) return "中文解析：未能确认0元，已按规则直接失败。";
+        if (/stripe_amount_nonzero|amount=.*source=/.test(text)) return "中文解析：Stripe 金额不是0，已按规则直接失败。";
+        if (/出口不是|country|国家不符/.test(text)) return "中文解析：代理出口国家与当前任务要求不一致。";
+        if (/checkout_not_active_session/.test(text)) return "中文解析：Checkout Session 已失效，不能继续 confirm。";
+        if (/cancelled|已停止|已取消/.test(text)) return "中文解析：任务已取消。";
+        if (/rate_limited/.test(text)) return "中文解析：后端并发达到上限，已拒绝新任务。";
+        if (/checkout_confirm_error|confirm/i.test(text)) return "中文解析：Stripe confirm 阶段失败。";
+        if (/blocked|exception/i.test(text)) return "中文解析：approve 返回 blocked/exception，已尝试复投或最终失败。";
+        if (/timeout|timed out|网络|连接|proxy|代理/i.test(text)) return "中文解析：网络或代理异常。";
+        if (task.status === "失败") return "中文解析：任务失败，需查看原文定位。";
+        return "";
+      }
+
+      function resultHtml(task) {
+        if (task.status === "成功") {
+          const raw = `成功 attempts=${linkAttemptText(task)} amount=${task.stripe_amount || "?"} ${task.currency || ""} ${task.long_url_present ? `url#${task.long_url_hash || ""}` : ""}`;
+          return `${escapeHtml(raw)}<br><span class="note">${escapeHtml(chineseStatusSummary(task))}</span>`;
+        }
+        if (task.status === "失败") {
+          const raw = `失败 attempts=${linkAttemptText(task)} ${task.detail || ""}`;
+          return `${escapeHtml(raw)}<br><span class="note">${escapeHtml(chineseStatusSummary(task))}</span>`;
+        }
+        return escapeHtml(task.status);
+      }
+
+      function isNetworkFailure(detail) {
+        return /网络异常|timeout|timed out|超时|Failed to fetch|连接|connection|proxy|代理/i.test(String(detail || ""));
+      }
+
+      function readConcurrency() {
+        const raw = String($("concurrencyInput").value || "").trim();
+        const parsed = raw ? Number.parseInt(raw, 10) : MAX_MATRIX_CONCURRENCY;
+        if (!Number.isFinite(parsed)) return MAX_MATRIX_CONCURRENCY;
+        return Math.max(1, Math.min(MAX_MATRIX_CONCURRENCY, parsed));
+      }
+
+      function readProviderRetryLimit() {
+        const raw = String($("providerRetryLimitInput").value || "").trim();
+        const parsed = raw ? Number.parseInt(raw, 10) : DEFAULT_PROVIDER_RETRY_LIMIT;
+        if (!Number.isFinite(parsed)) return DEFAULT_PROVIDER_RETRY_LIMIT;
+        return Math.max(1, Math.min(MAX_PROVIDER_RETRY_LIMIT, parsed));
+      }
+
+      function linkAttemptText(task) {
+        const count = Number(task.link_attempt_count || 0);
+        const limit = Number(task.link_attempt_limit || readProviderRetryLimit());
+        return count > 0 ? `${count}/${limit}` : `0/${limit}`;
+      }
+
+      function makeTasks() {
+        const jpProxyRaw = $("jpCheckoutProxy").value.trim();
+        const thProxyRaw = $("thCheckoutProxy").value.trim();
+        const brProxyRaw = $("brCheckoutProxy").value.trim();
+        const template = $("globalProxyTemplate").value.trim();
+        if (CHECKOUT_COUNTRIES.includes("JP") && !jpProxyRaw) throw new Error("checkout JP proxy is required.");
+        if (CHECKOUT_COUNTRIES.includes("TH") && !thProxyRaw) throw new Error("checkout TH proxy is required.");
+        if (CHECKOUT_COUNTRIES.includes("BR") && !brProxyRaw) throw new Error("checkout BR proxy is required.");
+        const checkoutProxies = {
+          JP: buildProxyUrl(parseProxyInput(jpProxyRaw)),
+          TH: buildProxyUrl(parseProxyInput(thProxyRaw)),
+          BR: buildProxyUrl(parseProxyInput(brProxyRaw)),
+        };
+        return OPENAI_COUNTRIES.flatMap((country) => {
+          return CHECKOUT_COUNTRIES.map((checkoutCountry) => ({
+            id: `${country}-${checkoutCountry}`,
+            target_country: country,
+            checkout_proxy_country: checkoutCountry,
+            checkout_proxy: checkoutProxies[checkoutCountry] || checkoutProxies.JP,
+            target_proxy: template ? proxyForCountry(template, country) : (checkoutProxies[checkoutCountry] || checkoutProxies.JP),
+            checkout_ip: "",
+            provider_ip: "",
+            provider_country_code: "",
+            approve_ip: "",
+            approve_country_code: "",
+            current_proxy_ip: "",
+            current_proxy_country_code: "",
+            stage: "等待",
+            status: "等待",
+            detail: "",
+            stripe_amount: "",
+            stripe_amount_source: "",
+            currency: "",
+            link_attempt_count: 0,
+            link_attempt_limit: readProviderRetryLimit(),
+            run_id: "",
+            log_path: "",
+            long_url: "",
+            long_url_present: false,
+            long_url_hash: "",
+            provider_same_as_target: FORCE_NETWORK_STAGES_TO_CHECKOUT ? false : $("providerSameAsTarget").checked,
+            approve_same_as_checkout: FORCE_NETWORK_STAGES_TO_CHECKOUT ? true : $("approveSameAsCheckout").checked,
+            worker_label: "",
+            token_label: "",
+            events: [],
+          }));
+        });
+      }
+
+      function renderRows() {
+        $("matrixBody").innerHTML = tasks
+          .map((task) => {
+            const cls = task.status === "成功" ? "success" : task.status === "失败" ? "fail" : task.status === "运行中" ? "running" : "waiting";
+            const statusClass = task.status === "成功" ? "status-ok" : task.status === "失败" ? "status-fail" : task.status === "运行中" ? "status-run" : "";
+            const checkoutText = task.checkout_ip
+              ? `${task.checkout_proxy_country} ${task.checkout_ip}`
+              : task.checkout_proxy_country;
+            const workerText = task.worker_label ? `<span class="worker-tag">${escapeHtml(task.worker_label)} · ${escapeHtml(task.token_label)}</span>` : "";
+            return `
+              <div class="matrix-row ${cls}" id="row-${escapeHtml(task.id)}">
+                <div class="cell country">${escapeHtml(task.target_country)}${workerText}</div>
+                <div class="cell checkout">${escapeHtml(checkoutText)}</div>
+                <div class="cell">${escapeHtml(linkAttemptText(task))}</div>
+                <div class="cell">${escapeHtml(task.stage || "等待")}</div>
+                <div class="cell">${escapeHtml(proxyIpText(task))}</div>
+                <div class="cell">${escapeHtml(amountText(task))}</div>
+                <div class="cell ${statusClass}">${resultHtml(task)}</div>
+              </div>
+            `;
+          })
+          .join("");
+        updateSummary();
+      }
+
+      function renderTask(task) {
+        const row = document.getElementById(`row-${task.id}`);
+        if (!row) {
+          renderRows();
+          return;
+        }
+        const cls = task.status === "成功" ? "success" : task.status === "失败" ? "fail" : task.status === "运行中" ? "running" : "waiting";
+        const statusClass = task.status === "成功" ? "status-ok" : task.status === "失败" ? "status-fail" : task.status === "运行中" ? "status-run" : "";
+        const checkoutText = task.checkout_ip ? `${task.checkout_proxy_country} ${task.checkout_ip}` : task.checkout_proxy_country;
+        const workerText = task.worker_label ? `<span class="worker-tag">${escapeHtml(task.worker_label)} · ${escapeHtml(task.token_label)}</span>` : "";
+        row.className = `matrix-row ${cls}`;
+        row.innerHTML = `
+          <div class="cell country">${escapeHtml(task.target_country)}${workerText}</div>
+          <div class="cell checkout">${escapeHtml(checkoutText)}</div>
+          <div class="cell">${escapeHtml(linkAttemptText(task))}</div>
+          <div class="cell">${escapeHtml(task.stage || "等待")}</div>
+          <div class="cell">${escapeHtml(proxyIpText(task))}</div>
+          <div class="cell">${escapeHtml(amountText(task))}</div>
+          <div class="cell ${statusClass}">${resultHtml(task)}</div>
+        `;
+        updateSummary();
+      }
+
+      function updateSummary() {
+        const total = tasks.length;
+        const success = tasks.filter((task) => task.status === "成功").length;
+        const failure = tasks.filter((task) => task.status === "失败").length;
+        const done = success + failure;
+        const zero = tasks.filter((task) => task.status === "成功" && String(task.stripe_amount || "") === "0").length;
+        $("totalCount").textContent = `总数 ${total}`;
+        $("doneCount").textContent = `完成 ${done}`;
+        $("successCount").textContent = `成功 ${success}`;
+        $("failCount").textContent = `失败 ${failure}`;
+        $("zeroCount").textContent = `0元成功 ${zero}`;
+        $("saveState").classList.toggle("active", active);
+      }
+
+      function updateTemplatePreview() {
+        const box = $("templatePreview");
+        try {
+          const template = $("globalProxyTemplate").value.trim();
+          if (!template) {
+            box.className = "preview";
+            box.textContent = `国家 ${OPENAI_COUNTRIES.length} 个，任务 ${OPENAI_COUNTRIES.length * CHECKOUT_COUNTRIES.length} 条。`;
+            return;
+          }
+          box.className = "preview";
+          const info = proxyTemplateInfo(template, "US");
+          const dynamicText = info.dynamic ? "动态模板：已检测到 -global/-XX" : "固定代理：未检测到动态国家码";
+          const modeText = info.dynamic ? "provider/approve：按当前国家动态提取 IP" : "provider/approve：使用同一固定代理";
+          box.textContent = `国家 ${OPENAI_COUNTRIES.length} 个，任务 ${OPENAI_COUNTRIES.length * CHECKOUT_COUNTRIES.length} 条。${dynamicText}。US 示例：${proxyFormatForCountry("US")}。${modeText}。`;
+        } catch (error) {
+          box.className = "preview error";
+          box.textContent = error instanceof Error ? error.message : String(error);
+        }
+      }
+
+      function payloadForTask(task, token) {
+        const approveSameAsCheckout = FORCE_NETWORK_STAGES_TO_CHECKOUT ? true : Boolean(task.approve_same_as_checkout);
+        const providerSameAsTarget = FORCE_NETWORK_STAGES_TO_CHECKOUT ? false : Boolean(task.provider_same_as_target);
+        const providerUsesCheckout = approveSameAsCheckout && !providerSameAsTarget;
+        return {
+          accessToken: token,
+          jp_proxy: task.checkout_proxy,
+          checkout_proxy_override: task.checkout_proxy,
+          provider_proxy_override: providerUsesCheckout ? task.checkout_proxy : task.target_proxy,
+          provider_same_as_target: providerSameAsTarget,
+          approve_proxy_override: approveSameAsCheckout ? task.checkout_proxy : task.target_proxy,
+          approve_same_as_checkout: approveSameAsCheckout,
+          billing_country: task.target_country,
+          payment_method_country: task.checkout_proxy_country,
+          payment_method_country_pool: [task.checkout_proxy_country],
+          run_mode: "combo_fallback",
+          checkout_ui_mode: "custom",
+          payment_locale: "en",
+          enable_approve_blocked_burst: true,
+          single_proxy_mode: false,
+          all_jp_proxy: false,
+          batch_target_country: task.target_country,
+          batch_checkout_proxy_country: task.checkout_proxy_country,
+          require_zero_stripe_amount: true,
+          provider_retry_limit: readProviderRetryLimit(),
+          strict_same_proxy_ip: true,
+          strict_approve_same_proxy_ip: false,
+        };
+      }
+
+      async function fetchJson(url, options = {}, retries = 1) {
+        let lastError = null;
+        for (let attempt = 0; attempt <= retries; attempt += 1) {
+          try {
+            const mergedOptions = { ...options };
+            const headers = new Headers(mergedOptions.headers || {});
+            const needsRunKey = String(url).startsWith("/api/") && !String(url).startsWith("/api/local-run-key");
+            if (needsRunKey && localRunKey) {
+              headers.set("X-Local-Run-Key", localRunKey);
+            }
+            mergedOptions.headers = headers;
+            const response = await fetch(url, mergedOptions);
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) {
+              const detail = String(data.detail || "");
+              if (response.status === 403 && needsRunKey && detail.includes("invalid local run key")) {
+                localRunKey = "";
+                await initLocalRunKey();
+                if (attempt < retries + 1) {
+                  await sleep(150);
+                  continue;
+                }
+              }
+              throw new Error(data.detail || `HTTP ${response.status}`);
+            }
+            return data;
+          } catch (error) {
+            lastError = error;
+            if (attempt < retries) await sleep(450);
+          }
+        }
+        throw lastError || new Error("请求失败");
+      }
+
+      async function initLocalRunKey() {
+        const data = await fetchJson("/api/local-run-key", { cache: "no-store" }, 1);
+        localRunKey = data.run_key || "";
+        if (!localRunKey) throw new Error("未获取到本地运行 key。");
+      }
+
+      function sanitizeResultUrlFields(task, data) {
+        task.long_url_present = Boolean(data?.long_url_present || data?.long_url);
+        task.long_url_hash = data?.long_url_hash || "";
+        task.long_url = "";
+      }
+
+      function appendEventLog(task, event) {
+        const box = $("eventLog");
+        if (!box) return;
+        const line = document.createElement("div");
+        line.className = "log-line";
+        const when = event.ts ? new Date(Number(event.ts) * 1000).toLocaleTimeString() : new Date().toLocaleTimeString();
+        const step = event.step || event.type || "event";
+        line.textContent = `[${when}] [${task.id}] [${step}] ${event.message || ""}`;
+        box.appendChild(line);
+        while (box.children.length > 300) box.removeChild(box.firstChild);
+        $("logCount").textContent = `${box.children.length} 条`;
+        box.scrollTop = box.scrollHeight;
+      }
+
+      function updateTaskFromLog(task, event) {
+        appendEventLog(task, event);
+        task.stage = event.message || task.stage;
+        if (event.link_attempt_count) {
+          task.link_attempt_count = Number(event.link_attempt_count) || task.link_attempt_count || 0;
+        }
+        if (event.link_attempt_limit) {
+          task.link_attempt_limit = Number(event.link_attempt_limit) || task.link_attempt_limit || readProviderRetryLimit();
+        }
+        if (event.step === "stripe_amount") {
+          task.stripe_amount = event.stripe_amount || task.stripe_amount;
+          task.stripe_amount_source = event.stripe_amount_source || task.stripe_amount_source;
+          task.currency = event.currency || task.currency;
+        }
+        if (event.proxy_ip) {
+          task.current_proxy_ip = event.proxy_ip;
+          task.current_proxy_country_code = event.proxy_country_code || "";
+          if (event.proxy_stage === "provider") {
+            task.provider_ip = event.proxy_ip;
+            task.provider_country_code = event.proxy_country_code || "";
+          }
+          if (event.proxy_stage === "approve") {
+            task.approve_ip = event.proxy_ip;
+            task.approve_country_code = event.proxy_country_code || "";
+          }
+        }
+        const message = String(event.message || "");
+        const ipMatch = message.match(/出口：([^/。]+)\s*\/\s*([A-Z]{2}|未知)/);
+        if (event.step === "checkout" && ipMatch) {
+          task.checkout_ip = `${ipMatch[1].trim()}/${ipMatch[2].trim()}`;
+        }
+        if (!event.proxy_ip && (event.step === "proxy" || event.step === "approve") && ipMatch) {
+          task.current_proxy_ip = ipMatch[1].trim();
+          task.current_proxy_country_code = ipMatch[2].trim();
+        }
+        task.events.push(event);
+        if (task.events.length > MAX_TASK_EVENTS) {
+          task.events.splice(0, task.events.length - MAX_TASK_EVENTS);
+        }
+      }
+
+      async function pollTask(task) {
+        let cursor = 0;
+        let done = false;
+        let gotTerminal = false;
+        while (!done) {
+          if (abortRequested) throw new Error("已停止");
+          const data = await fetchJson(`/api/long-link/events/${encodeURIComponent(task.run_id)}?cursor=${cursor}`, { cache: "no-store" }, 2);
+          cursor = Number(data.cursor || cursor);
+          done = Boolean(data.done);
+          for (const event of data.events || []) {
+            if (event.type === "log") {
+              updateTaskFromLog(task, event);
+              renderTask(task);
+            } else if (event.type === "result") {
+              appendEventLog(task, event);
+              gotTerminal = true;
+              task.status = "成功";
+              task.stage = "完成";
+              sanitizeResultUrlFields(task, event.data || {});
+              task.stripe_amount = event.data?.stripe_amount || task.stripe_amount;
+              task.stripe_amount_source = event.data?.stripe_amount_source || task.stripe_amount_source;
+              task.currency = event.data?.currency || task.currency;
+              task.link_attempt_count = Number(event.data?.link_attempt_count || task.link_attempt_count || 0);
+              task.link_attempt_limit = Number(event.data?.link_attempt_limit || task.link_attempt_limit || readProviderRetryLimit());
+              renderTask(task);
+            } else if (event.type === "error") {
+              appendEventLog(task, event);
+              gotTerminal = true;
+              task.status = "失败";
+              task.stage = "失败";
+              task.detail = event.message || "运行失败";
+              renderTask(task);
+            }
+          }
+          if (!done) await sleep(700);
+        }
+        if (!gotTerminal && task.status !== "失败") {
+          task.status = "失败";
+          task.stage = "结束但未返回结果";
+          task.detail = "任务结束但未返回 result/error";
+          renderTask(task);
+        }
+      }
+
+      async function runTaskOnceWithToken(task, token) {
+        const started = await fetchJson("/api/long-link/start", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payloadForTask(task, token)),
+        }, 1);
+        task.run_id = started.run_id || "";
+        task.log_path = started.log_path || "";
+        task.stage = `已启动 ${task.run_id}`;
+        renderTask(task);
+        await pollTask(task);
+      }
+
+      async function runTaskWithNetworkRetry(task, token, workerLabel, tokenLabel) {
+        for (let attempt = 1; attempt <= NETWORK_TASK_RETRY_ATTEMPTS; attempt += 1) {
+          task.status = "运行中";
+          task.worker_label = workerLabel;
+          task.token_label = tokenLabel;
+          task.stage = attempt === 1 ? "启动任务" : `网络异常，重试 ${attempt}/${NETWORK_TASK_RETRY_ATTEMPTS}`;
+          task.detail = "";
+          task.events = [];
+          renderTask(task);
+          try {
+            await runTaskOnceWithToken(task, token);
+          } catch (error) {
+            task.status = "失败";
+            task.stage = "失败";
+            task.detail = error instanceof Error ? error.message : String(error);
+            renderTask(task);
+          }
+          if (task.status !== "失败" || !isNetworkFailure(task.detail) || attempt === NETWORK_TASK_RETRY_ATTEMPTS || abortRequested) {
+            return;
+          }
+          task.status = "运行中";
+          for (let left = Math.ceil(NETWORK_RETRY_DELAY_MS / 1000); left > 0; left -= 1) {
+            if (abortRequested) return;
+            task.stage = `代理/网络异常，${left}秒后重试 ${attempt + 1}/${NETWORK_TASK_RETRY_ATTEMPTS}`;
+            renderTask(task);
+            await sleep(1000);
+          }
+        }
+      }
+
+      function resultPayload(savedResponse = null) {
+        const success = tasks.filter((task) => task.status === "成功");
+        const failure = tasks.filter((task) => task.status === "失败");
+        const versionMismatch = tasks.length !== EXPECTED_MATRIX_TOTAL;
+        return {
+          type: "full_country_zero_amount_matrix",
+          filename: RESULT_FILENAME,
+          saved_at: new Date().toISOString(),
+          summary: {
+            total: tasks.length,
+            success: success.length,
+            failure: failure.length,
+            zero_amount_success: success.filter((task) => String(task.stripe_amount || "") === "0").length,
+            nonzero_amount_failed: failure.filter((task) => /stripe_amount_nonzero/.test(task.detail || "")).length,
+            concurrency: runConcurrency,
+            token_worker_count: runTokens.length,
+            provider_retry_limit: readProviderRetryLimit(),
+            link_attempt_total: tasks.reduce((sum, task) => sum + Number(task.link_attempt_count || 0), 0),
+            billing_profile_source: "precise-or-formatted",
+            billing_country_count: OPENAI_COUNTRIES.length,
+            payment_method_country_strategy: "checkout_proxy_country",
+            payment_method_country_pool: CHECKOUT_COUNTRIES,
+            result_version: versionMismatch ? "mismatch" : "current",
+          },
+          saved_file: savedResponse,
+          tasks: tasks.map((task) => ({
+            target_country: task.target_country,
+            checkout_proxy_country: task.checkout_proxy_country,
+            checkout_ip: task.checkout_ip,
+            provider_ip: task.provider_ip,
+            approve_ip: task.approve_ip,
+            current_proxy_ip: task.current_proxy_ip,
+            provider_proxy_country: task.approve_same_as_checkout && !task.provider_same_as_target ? task.checkout_proxy_country : task.target_country,
+            approve_proxy_country: task.approve_same_as_checkout ? task.checkout_proxy_country : task.target_country,
+            payment_method_country: task.checkout_proxy_country,
+            payment_method_country_pool: [task.checkout_proxy_country],
+            stripe_amount: task.stripe_amount,
+            stripe_amount_source: task.stripe_amount_source,
+            link_attempt_count: Number(task.link_attempt_count || 0),
+            link_attempt_limit: Number(task.link_attempt_limit || readProviderRetryLimit()),
+            amount_summary: amountText(task),
+            currency: task.currency,
+            status: task.status,
+            failure_reason: task.detail,
+            failure_summary_zh: chineseStatusSummary(task),
+            provider_same_as_target: task.provider_same_as_target,
+            approve_same_as_checkout: task.approve_same_as_checkout,
+            billing_profile_source: "polling",
+            worker_label: task.worker_label,
+            token_label: task.token_label,
+            run_id: task.run_id,
+            log_path: task.log_path,
+            long_url_present: Boolean(task.long_url_present),
+            long_url_hash: task.long_url_hash || "",
+          })),
+        };
+      }
+
+      async function saveResults() {
+        if (tasks.length !== EXPECTED_MATRIX_TOTAL) {
+          $("saveState").textContent = "结果版本异常，未覆盖保存";
+          return;
+        }
+        const payload = resultPayload();
+        const saved = await fetchJson("/api/batch-results", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ filename: RESULT_FILENAME, payload }),
+        }, 1);
+        $("saveState").textContent = `已保存 ${saved.filename}`;
+      }
+
+      async function cancelRunningTasks() {
+        const running = tasks.filter((task) => task.run_id && task.status === "运行中");
+        await Promise.allSettled(
+          running.map((task) => {
+            task.stage = "取消中";
+            renderTask(task);
+            return fetchJson(`/api/long-link/cancel/${encodeURIComponent(task.run_id)}`, { method: "POST" }, 0)
+              .then(() => {
+                task.status = "失败";
+                task.stage = "已取消";
+                task.detail = "cancelled: 已取消";
+                renderTask(task);
+              });
+          }),
+        );
+      }
+
+      function uniqueTokens(values) {
+        const seen = new Set();
+        return values
+          .map((value) => String(value || "").trim())
+          .filter(Boolean)
+          .filter((token) => {
+            if (seen.has(token)) return false;
+            seen.add(token);
+            return true;
+          });
+      }
+
+      function modalTokenLines() {
+        return uniqueTokens($("tokenListInput").value.split(/\r?\n/));
+      }
+
+      function collectInitialTokens() {
+        return uniqueTokens([$("primaryAccessToken").value]);
+      }
+
+      function updateTokenModalState() {
+        const desired = readConcurrency();
+        const modalTokens = modalTokenLines();
+        const mergedTokens = uniqueTokens([...tokenModalExistingTokens, ...modalTokens]);
+        const stillNeeded = Math.max(0, desired - mergedTokens.length);
+        const duplicateCount = tokenModalExistingTokens.length + modalTokens.length - mergedTokens.length;
+        $("tokenModalHint").textContent = `当前并发 ${desired}，已有 ${tokenModalExistingTokens.length} 个 token，还需要输入 ${tokenModalRequiredCount} 个 Access Token。`;
+        $("tokenModalCount").textContent = stillNeeded
+          ? `还需要输入 ${stillNeeded} 个 Access Token。`
+          : `已补齐，启动后使用 ${Math.min(desired, mergedTokens.length, MAX_MATRIX_CONCURRENCY)} 个 worker。`;
+        if (duplicateCount > 0 && stillNeeded > 0) {
+          $("tokenModalError").textContent = `已自动忽略重复 token，请补足 ${stillNeeded} 个。`;
+        } else {
+          $("tokenModalError").textContent = "";
+        }
+      }
+
+      function openTokenModal(requiredCount, existingTokens) {
+        tokenModalRequiredCount = Math.max(1, requiredCount);
+        tokenModalExistingTokens = uniqueTokens(existingTokens || []);
+        $("tokenListInput").value = "";
+        $("tokenModalError").textContent = "";
+        updateTokenModalState();
+        $("tokenModal").classList.add("show");
+        $("tokenListInput").focus();
+        return new Promise((resolve) => {
+          pendingTokenResolver = resolve;
+        });
+      }
+
+      function closeTokenModal(result) {
+        $("tokenModal").classList.remove("show");
+        tokenModalRequiredCount = 0;
+        tokenModalExistingTokens = [];
+        const resolver = pendingTokenResolver;
+        pendingTokenResolver = null;
+        if (resolver) resolver(result);
+      }
+
+      function confirmTokenModal() {
+        const modalTokens = modalTokenLines();
+        const mergedTokens = uniqueTokens([...tokenModalExistingTokens, ...modalTokens]);
+        const stillNeeded = Math.max(0, readConcurrency() - mergedTokens.length);
+        if (stillNeeded > 0) {
+          $("tokenModalError").textContent = `还需要输入 ${stillNeeded} 个 Access Token。`;
+          return;
+        }
+        closeTokenModal(mergedTokens.slice(0, Math.min(readConcurrency(), mergedTokens.length, MAX_MATRIX_CONCURRENCY)));
+      }
+
+      async function collectRunTokens() {
+        const desired = readConcurrency();
+        const initialTokens = collectInitialTokens();
+        const missing = Math.max(0, desired - initialTokens.length);
+        if (missing === 0) {
+          return initialTokens.slice(0, desired);
+        }
+        return openTokenModal(missing, initialTokens);
+      }
+
+      async function runMatrixWorkers(tokens) {
+        const concurrency = Math.min(readConcurrency(), tokens.length, MAX_MATRIX_CONCURRENCY);
+        let nextIndex = 0;
+        let activeWorkers = 0;
+        let peakWorkers = 0;
+        async function worker(workerIndex) {
+          const token = tokens[workerIndex];
+          const workerId = workerIndex + 1;
+          const workerLabel = `W${workerId}`;
+          const tokenLabel = `T${workerId}`;
+          activeWorkers += 1;
+          peakWorkers = Math.max(peakWorkers, activeWorkers);
+          try {
+            while (!abortRequested) {
+              const index = nextIndex;
+              nextIndex += 1;
+              if (index >= tasks.length) return;
+              const task = tasks[index];
+              task.worker_label = workerLabel;
+              task.token_label = tokenLabel;
+              task.stage = `${workerLabel} 领取任务`;
+              renderTask(task);
+              await runTaskWithNetworkRetry(task, token, workerLabel, tokenLabel);
+            }
+          } finally {
+            activeWorkers -= 1;
+          }
+        }
+        const workers = Array.from({ length: concurrency }, (_, index) => worker(index));
+        await Promise.all(workers);
+        return peakWorkers;
+      }
+
+      async function startMatrix() {
+        if (active) return;
+        if (!localRunKey) {
+          try {
+            await initLocalRunKey();
+          } catch (error) {
+            $("templatePreview").className = "preview error";
+            $("templatePreview").textContent = error instanceof Error ? error.message : String(error);
+            return;
+          }
+        }
+        try {
+          tasks = makeTasks();
+        } catch (error) {
+          $("templatePreview").className = "preview error";
+          $("templatePreview").textContent = error instanceof Error ? error.message : String(error);
+          return;
+        }
+        const tokens = await collectRunTokens();
+        if (!tokens || !tokens.length) return;
+        savePersistedForm();
+        abortRequested = false;
+        active = true;
+        if ($("eventLog")) $("eventLog").textContent = "";
+        if ($("logCount")) $("logCount").textContent = "0 条";
+        $("startBtn").disabled = true;
+        $("stopBtn").disabled = false;
+        runTokens = tokens;
+        runConcurrency = Math.min(readConcurrency(), runTokens.length, MAX_MATRIX_CONCURRENCY);
+        $("concurrencyInput").value = String(runConcurrency);
+        $("primaryAccessToken").disabled = true;
+        $("concurrencyInput").disabled = true;
+        $("providerRetryLimitInput").disabled = true;
+        $("providerSameAsTarget").disabled = true;
+        $("approveSameAsCheckout").disabled = true;
+        $("saveState").textContent = `运行中 并发 ${runConcurrency} / token ${runTokens.length}`;
+        renderRows();
+        await runMatrixWorkers(runTokens);
+        try {
+          await saveResults();
+        } catch (error) {
+          $("saveState").textContent = "保存失败";
+        }
+        active = false;
+        $("startBtn").disabled = false;
+        $("stopBtn").disabled = true;
+        $("primaryAccessToken").disabled = false;
+        $("concurrencyInput").disabled = false;
+        $("providerRetryLimitInput").disabled = false;
+        $("providerSameAsTarget").disabled = false;
+        $("approveSameAsCheckout").disabled = false;
+      }
+
+      const FORM_STORAGE_KEY = "globalMix.matrix.form.v2";
+      const PERSISTED_FIELD_IDS = [
+        "primaryAccessToken",
+        "jpCheckoutProxy",
+        "thCheckoutProxy",
+        "brCheckoutProxy",
+        "globalProxyTemplate",
+        "concurrencyInput",
+        "providerRetryLimitInput",
+        "providerSameAsTarget",
+        "approveSameAsCheckout",
+      ];
+
+      function readPersistedForm() {
+        try {
+          return JSON.parse(localStorage.getItem(FORM_STORAGE_KEY) || "{}") || {};
+        } catch (_) {
+          return {};
+        }
+      }
+
+      function savePersistedForm() {
+        const data = {};
+        for (const id of PERSISTED_FIELD_IDS) {
+          const element = $(id);
+          if (!element) continue;
+          data[id] = element.type === "checkbox" ? Boolean(element.checked) : String(element.value || "");
+        }
+        try {
+          localStorage.setItem(FORM_STORAGE_KEY, JSON.stringify(data));
+          if (!active) $("saveState").textContent = "配置已保存";
+        } catch (_) {
+          if (!active) $("saveState").textContent = "配置保存失败";
+        }
+      }
+
+      function restorePersistedForm() {
+        const data = readPersistedForm();
+        for (const id of PERSISTED_FIELD_IDS) {
+          if (!(id in data)) continue;
+          const element = $(id);
+          if (!element) continue;
+          if (element.type === "checkbox") {
+            element.checked = Boolean(data[id]);
+          } else {
+            element.value = String(data[id] ?? "");
+          }
+        }
+        if (data && Object.keys(data).length > 0) $("saveState").textContent = "配置已恢复";
+      }
+
+      function bindPersistedForm() {
+        for (const id of PERSISTED_FIELD_IDS) {
+          const element = $(id);
+          if (!element) continue;
+          element.addEventListener(element.type === "checkbox" ? "change" : "input", () => {
+            if (id === "concurrencyInput") element.value = String(readConcurrency());
+            if (id === "providerRetryLimitInput") element.value = String(readProviderRetryLimit());
+            savePersistedForm();
+            updateTemplatePreview();
+          });
+        }
+      }
+
+      $("globalProxyTemplate").addEventListener("input", updateTemplatePreview);
+      $("concurrencyInput").addEventListener("change", () => {
+        $("concurrencyInput").value = String(readConcurrency());
+        savePersistedForm();
+      });
+      $("providerRetryLimitInput").addEventListener("change", () => {
+        $("providerRetryLimitInput").value = String(readProviderRetryLimit());
+        savePersistedForm();
+      });
+      $("tokenListInput").addEventListener("input", updateTokenModalState);
+      $("tokenCancelBtn").addEventListener("click", () => closeTokenModal(null));
+      $("tokenConfirmBtn").addEventListener("click", confirmTokenModal);
+      $("tokenModal").addEventListener("click", (event) => {
+        if (event.target === $("tokenModal")) closeTokenModal(null);
+      });
+      $("startBtn").addEventListener("click", startMatrix);
+      $("stopBtn").addEventListener("click", () => {
+        abortRequested = true;
+        $("saveState").textContent = "停止中";
+        cancelRunningTasks();
+      });
+
+      async function boot() {
+        restorePersistedForm();
+        bindPersistedForm();
+        updateTemplatePreview();
+        try {
+          await initLocalRunKey();
+        } catch (error) {
+          $("templatePreview").className = "preview error";
+          $("templatePreview").textContent = error instanceof Error ? error.message : String(error);
+        }
+      }
+
+      boot();
+      tasks = OPENAI_COUNTRIES.flatMap((country) =>
+        CHECKOUT_COUNTRIES.map((checkoutCountry) => ({
+          id: `${country}-${checkoutCountry}`,
+          target_country: country,
+          checkout_proxy_country: checkoutCountry,
+          checkout_ip: "",
+          provider_ip: "",
+          provider_country_code: "",
+          approve_ip: "",
+          approve_country_code: "",
+          current_proxy_ip: "",
+          current_proxy_country_code: "",
+          stage: "等待",
+          status: "等待",
+          detail: "",
+          stripe_amount: "",
+          stripe_amount_source: "",
+          currency: "",
+          link_attempt_count: 0,
+          link_attempt_limit: readProviderRetryLimit(),
+          run_id: "",
+          log_path: "",
+          long_url: "",
+          long_url_present: false,
+          long_url_hash: "",
+          provider_same_as_target: false,
+          approve_same_as_checkout: true,
+          worker_label: "",
+          token_label: "",
+          events: [],
+        })),
+      );
+      renderRows();
+    </script>
+  </body>
+</html>

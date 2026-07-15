@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 安全问题
+    url: https://github.com/Moyu-xin
+    about: 请先阅读 SECURITY.md，不要公开敏感信息。

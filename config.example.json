@@ -1,0 +1,26 @@
+{
+  "auth-key": "moyu666",
+  "proxy": "",
+  "proxy_runtime": {
+    "enabled": false,
+    "egress_mode": "direct",
+    "proxy_url": "",
+    "resource_proxy_url": "",
+    "skip_ssl_verify": false,
+    "reset_session_status_codes": [
+      403
+    ],
+    "clearance": {
+      "enabled": false,
+      "mode": "none",
+      "cf_cookies": "",
+      "cf_clearance": "",
+      "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/145.0.0.0 Safari/537.36",
+      "browser": "chrome",
+      "flaresolverr_url": "",
+      "timeout_sec": 60,
+      "refresh_interval": 3600,
+      "warm_up_on_start": false
+    }
+  }
+}

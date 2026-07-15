@@ -1,0 +1,39 @@
+name: Bug report
+description: 报告可复现的问题
+title: "[Bug] "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: 请删除邮箱、密码、Token、Cookie、代理认证和管理密钥。
+  - type: input
+    id: version
+    attributes:
+      label: 版本
+      placeholder: "1.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: deployment
+    attributes:
+      label: 部署方式
+      options: [Windows 本地, Docker Compose, 其他]
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 预期与实际结果
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: 已脱敏日志
+      render: shell

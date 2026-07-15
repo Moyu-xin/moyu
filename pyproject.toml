@@ -1,0 +1,26 @@
+[project]
+name = "chatgpt-register-only"
+version = "1.0.0"
+description = "Moyu local registration and account inventory dashboard"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "curl-cffi>=0.15.0",
+    "fastapi>=0.136.0",
+    "psutil>=7.0.0",
+    "PyYAML>=6.0.3",
+    "requests>=2.32.5",
+    "uvicorn>=0.44.0",
+]
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["api*", "services*", "utils*"]
+exclude = ["tests*", "web*", "data*", "logs*", "backups*"]
+
+[tool.setuptools.package-data]
+"services.plus_engine" = ["public/*.html"]
+"utils" = ["*.cjs"]
