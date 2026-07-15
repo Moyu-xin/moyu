@@ -70,6 +70,7 @@ sh deploy_server.sh
 ## 开发与验证
 
 ```powershell
+python -m pip install -e ".[test]"
 python -m unittest discover -s tests
 python -m compileall -q api services scripts utils main.py serve_local.py
 cd web
