@@ -1,4 +1,4 @@
-import { httpRequest } from "@/lib/request";
+import { cachedHttpRequest, httpRequest } from "@/lib/request";
 
 export type AuthRole = "admin" | "user";
 
@@ -64,6 +64,16 @@ export type SystemOverview = {
   hot_reload: boolean;
 };
 
+export type HotReloadStatus = {
+  source: string;
+  revision: number;
+  applied_at: string;
+  running: boolean;
+  preserved_running_tasks: number;
+  applies_to: "new_tasks" | "next_run" | string;
+  task_snapshot_mode: boolean;
+};
+
 export type RegisterConfig = {
   total: number;
   threads: number;
@@ -92,6 +102,11 @@ export type RegisterConfig = {
     stored_total?: number;
   };
   logs?: Array<{ time: string; text: string; level: string }>;
+  runtime_config?: {
+    revision: number;
+    task_snapshot_mode: boolean;
+    last_hot_reload?: HotReloadStatus;
+  };
 };
 
 export type MailboxItem = {
@@ -199,6 +214,14 @@ export type MailProviderConfigs = {
   };
 };
 
+export type InventoryPageInfo = {
+  offset: number;
+  limit: number;
+  returned: number;
+  total: number;
+  partial: boolean;
+};
+
 export type MailboxPool = {
   items: MailboxItem[];
   stats: Record<string, number>;
@@ -211,6 +234,7 @@ export type MailboxPool = {
   updated?: number;
   removed?: number;
   state_removed?: number;
+  page_info?: InventoryPageInfo;
 };
 
 export type MailboxGroupRecord = {
@@ -390,6 +414,7 @@ export type AccountPool = {
   parsed?: number;
   changed_emails?: string[];
   changed_account_ids?: string[];
+  page_info?: InventoryPageInfo;
 };
 
 export type PartialAccountItem = {
@@ -509,6 +534,7 @@ export type PartialAccountPool = {
   skipped?: number;
   parsed?: number;
   changed_selectors?: string[];
+  page_info?: InventoryPageInfo;
 };
 
 export type PartialAccountHealthState = {
@@ -1035,8 +1061,9 @@ export async function restartSystem() {
   return httpRequest<{ ok: boolean; scheduled: boolean; delay_seconds: number }>("/api/system/restart", { method: "POST" });
 }
 
-export async function fetchOutlookMailboxPool() {
-  return httpRequest<{ mailboxes: MailboxPool }>("/api/outlook-mailboxes");
+export async function fetchOutlookMailboxPool(options: { force?: boolean; preview?: boolean } = {}) {
+  const path = options.preview ? "/api/outlook-mailboxes?limit=100" : "/api/outlook-mailboxes";
+  return cachedHttpRequest<{ mailboxes: MailboxPool }>(path, { maxAgeMs: 10_000, force: options.force });
 }
 
 export async function fetchOutlookMailboxMessages(email: string, options: { limit?: number; mode?: "auto" | "graph" | "imap"; request_timeout?: number } = {}) {
@@ -1083,8 +1110,8 @@ export async function deleteMailboxGroup(name: string, moveTo = "默认") {
   return httpRequest<{ mailbox_groups: MailboxGroupCatalog; register: RegisterConfig }>("/api/mailbox-groups", { method: "DELETE", body: { name, move_to: moveTo } });
 }
 
-export async function fetchMailProviderConfigs() {
-  return httpRequest<{ provider_configs: MailProviderConfigs }>("/api/mail-provider-configs");
+export async function fetchMailProviderConfigs(options: { force?: boolean } = {}) {
+  return cachedHttpRequest<{ provider_configs: MailProviderConfigs }>("/api/mail-provider-configs", { maxAgeMs: 15_000, force: options.force });
 }
 
 export async function updateMailProviderConfigs(updates: Partial<MailProviderConfigs>) {
@@ -1121,12 +1148,14 @@ export async function fetchMailboxCode(email: string, providerType = "", scanRec
   });
 }
 
-export async function fetchAccountPool() {
-  return httpRequest<{ account_pool: AccountPool }>("/api/accounts");
+export async function fetchAccountPool(options: { force?: boolean; preview?: boolean } = {}) {
+  const path = options.preview ? "/api/accounts?limit=100" : "/api/accounts";
+  return cachedHttpRequest<{ account_pool: AccountPool }>(path, { maxAgeMs: 10_000, force: options.force });
 }
 
-export async function fetchPartialAccountPool() {
-  return httpRequest<{ partial_account_pool: PartialAccountPool }>("/api/partial-accounts");
+export async function fetchPartialAccountPool(options: { force?: boolean; preview?: boolean } = {}) {
+  const path = options.preview ? "/api/partial-accounts?limit=100" : "/api/partial-accounts";
+  return cachedHttpRequest<{ partial_account_pool: PartialAccountPool }>(path, { maxAgeMs: 10_000, force: options.force });
 }
 
 export async function importPartialAccounts(text: string, options: { auto_health_check?: boolean; drop_banned?: boolean } = {}) {
@@ -1641,24 +1670,24 @@ export type ManagedMihomoStatus = {
   }>;
 };
 
-export async function fetchProxyPool() {
-  return httpRequest<{ proxy_pool: ProxyPool }>("/api/proxy-pool");
+export async function fetchProxyPool(options: { force?: boolean } = {}) {
+  return cachedHttpRequest<{ proxy_pool: ProxyPool }>("/api/proxy-pool", { maxAgeMs: 10_000, force: options.force });
 }
 
 export async function updateProxyPool(updates: Partial<ProxyPool>) {
-  return httpRequest<{ proxy_pool: ProxyPool }>("/api/proxy-pool", { method: "POST", body: updates });
+  return httpRequest<{ proxy_pool: ProxyPool; hot_reload: HotReloadStatus }>("/api/proxy-pool", { method: "POST", body: updates });
 }
 
 export async function importProxySubscriptions(payload: { items?: Array<{ name?: string; url: string; allow_private?: boolean }>; text?: string; name?: string; url?: string; fetch?: boolean; allow_private?: boolean }) {
-  return httpRequest<{ proxy_pool: ProxyPool }>("/api/proxy-pool/import-subscriptions", { method: "POST", body: payload });
+  return httpRequest<{ proxy_pool: ProxyPool; hot_reload: HotReloadStatus }>("/api/proxy-pool/import-subscriptions", { method: "POST", body: payload });
 }
 
 export async function importProxyNodes(text: string) {
-  return httpRequest<{ proxy_pool: ProxyPool }>("/api/proxy-pool/import-nodes", { method: "POST", body: { text } });
+  return httpRequest<{ proxy_pool: ProxyPool; hot_reload: HotReloadStatus }>("/api/proxy-pool/import-nodes", { method: "POST", body: { text } });
 }
 
 export async function syncProxyPoolMihomo() {
-  return httpRequest<{ proxy_pool: ProxyPool }>("/api/proxy-pool/sync-mihomo", { method: "POST" });
+  return httpRequest<{ proxy_pool: ProxyPool; hot_reload: HotReloadStatus }>("/api/proxy-pool/sync-mihomo", { method: "POST" });
 }
 
 export async function fetchManagedMihomoStatus() {
@@ -1690,15 +1719,27 @@ export async function testProxyPoolNode(nodeId: string, proxyUrl = "") {
 }
 
 export async function clearProxyPoolNodes() {
-  return httpRequest<{ proxy_pool: ProxyPool }>("/api/proxy-pool/clear-nodes", { method: "POST" });
+  return httpRequest<{ proxy_pool: ProxyPool; hot_reload: HotReloadStatus }>("/api/proxy-pool/clear-nodes", { method: "POST" });
 }
 
 export async function deleteProxyPoolNode(nodeId: string) {
-  return httpRequest<{ proxy_pool: ProxyPool }>(`/api/proxy-pool/nodes/${encodeURIComponent(nodeId)}`, { method: "DELETE" });
+  return httpRequest<{ proxy_pool: ProxyPool; hot_reload: HotReloadStatus }>(`/api/proxy-pool/nodes/${encodeURIComponent(nodeId)}`, { method: "DELETE" });
 }
 
 export async function deleteProxyPoolSubscription(subscriptionId: string) {
-  return httpRequest<{ proxy_pool: ProxyPool }>(`/api/proxy-pool/subscriptions/${encodeURIComponent(subscriptionId)}`, { method: "DELETE" });
+  return httpRequest<{ proxy_pool: ProxyPool; hot_reload: HotReloadStatus }>(`/api/proxy-pool/subscriptions/${encodeURIComponent(subscriptionId)}`, { method: "DELETE" });
+}
+
+export async function prefetchManagementData(section: string, view = "") {
+  const requests: Array<Promise<unknown>> = [];
+  if (section === "mail") {
+    requests.push(view === "config" ? fetchMailProviderConfigs() : fetchOutlookMailboxPool({ preview: true }));
+  } else if (section === "accounts") {
+    requests.push(view === "partials" ? fetchPartialAccountPool({ preview: true }) : fetchAccountPool({ preview: true }));
+  } else if (section === "proxy") {
+    requests.push(fetchProxyPool());
+  }
+  await Promise.allSettled(requests);
 }
 
 export type Sub2ApiAccountList = {

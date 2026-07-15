@@ -3,8 +3,9 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
-import { LogOut, ShieldCheck, UserPlus } from "lucide-react";
+import { LogOut, ShieldCheck } from "lucide-react";
 
+import { BrandMark } from "@/components/brand-mark";
 import { Button } from "@/components/ui/button";
 import { getValidatedAuthSession } from "@/lib/auth-session";
 import { clearStoredAuthSession, type StoredAuthSession } from "@/store/auth";
@@ -45,9 +46,7 @@ export function TopNav() {
     <header className="rounded-[26px] border border-slate-200/80 bg-white/[0.88] shadow-[0_16px_42px_-36px_rgba(15,23,42,0.45)] backdrop-blur">
       <div className="flex h-16 items-center justify-between gap-3 px-4 sm:px-5">
         <Link href="/register" className="flex min-w-0 items-center gap-3 text-[15px] font-semibold tracking-tight text-slate-950">
-          <span className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-slate-950 text-emerald-300">
-            <UserPlus className="size-4" />
-          </span>
+          <BrandMark className="size-9" />
           <span className="min-w-0">
             <span className="block truncate">摸鱼机</span>
             <span className="block truncate text-xs font-medium text-slate-500">本地控制台</span>

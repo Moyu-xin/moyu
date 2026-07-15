@@ -118,7 +118,9 @@ export function ProxyPoolCard() {
         subscriptions: pool.subscriptions,
       });
       setPool(data.proxy_pool);
-      toast.success(Z.save + Z.ok);
+      toast.success(data.hot_reload.running
+        ? `代理配置已热更新至 r${data.hot_reload.revision}，进行中任务保持原节点`
+        : `${Z.save}${Z.ok}，下次任务直接生效`);
     } catch (e) {
       toast.error(e instanceof Error ? e.message : Z.save + Z.failed);
     } finally {

@@ -4,11 +4,12 @@ import json
 import threading
 import time
 import uuid
+from copy import deepcopy
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import datetime, timezone
 from pathlib import Path
 
-from services import mailbox_pool_store, partial_account_store, proxy_controller, proxy_pool_store
+from services import mailbox_pool_store, partial_account_store, proxy_controller, proxy_pool_store, registered_account_store
 from services.atomic_json_store import read_json, write_json
 from services.managed_mihomo_service import managed_mihomo_manager
 from services.config import DATA_DIR
@@ -157,6 +158,10 @@ class RegisterService:
         self._lock = threading.RLock()
         self._runner: threading.Thread | None = None
         self._logs: list[dict] = []
+        self._runtime_revision = 1
+        self._last_hot_reload: dict = {}
+        self._pool_metrics_signature: tuple | None = None
+        self._pool_metrics_cache: dict = {}
         openai_register.register_log_sink = self._append_log
         self._config = self._load()
         try:
@@ -184,6 +189,52 @@ class RegisterService:
         self._config = mailbox_pool_store.apply_to_register_config(self._config)
         self._drop_mail_proxy()
         openai_register.config.update({k: self._config[k] for k in ("mail", "proxy", "total", "threads", "k12_mode", "register_mode", "product_mode", "mailbox_group")})
+
+    def is_running(self) -> bool:
+        with self._lock:
+            return bool(self._runner and self._runner.is_alive() and self._config.get("enabled"))
+
+    def _is_enabled(self) -> bool:
+        with self._lock:
+            return bool(self._config.get("enabled"))
+
+    def _control_snapshot(self) -> dict:
+        with self._lock:
+            return deepcopy(self._config)
+
+    def _task_config_snapshot(self) -> dict:
+        with self._lock:
+            snapshot = deepcopy(self._config)
+            snapshot["runtime_revision"] = self._runtime_revision
+            return snapshot
+
+    def _mark_hot_reload(self, source: str) -> dict:
+        self._runtime_revision += 1
+        running = self.is_running()
+        status = {
+            "source": str(source or "config"),
+            "revision": self._runtime_revision,
+            "applied_at": _now(),
+            "running": running,
+            "preserved_running_tasks": int((self._config.get("stats") or {}).get("running") or 0) if running else 0,
+            "applies_to": "new_tasks" if running else "next_run",
+            "task_snapshot_mode": True,
+        }
+        self._last_hot_reload = status
+        if running:
+            label = "邮箱" if source == "mail" else "代理" if source == "proxy" else "运行"
+            self._logs.append({
+                "time": status["applied_at"],
+                "text": f"{label}配置已热更新至 r{self._runtime_revision}：进行中的任务继续使用原快照，后续任务使用新配置",
+                "level": "info",
+            })
+            self._logs = self._logs[-300:]
+        self._save()
+        return deepcopy(status)
+
+    def hot_reload_proxy_config(self) -> dict:
+        with self._lock:
+            return self._mark_hot_reload("proxy")
 
     def _validate_runtime_mail_config(self) -> None:
         mail = self._config.get("mail") if isinstance(self._config.get("mail"), dict) else {}
@@ -217,7 +268,15 @@ class RegisterService:
             stats = self._config.get("stats") if isinstance(self._config.get("stats"), dict) else {}
             stats.update({key: value for key, value in pool_metrics.items() if key in {"registered_total", "partial_total", "stored_total"}})
             self._config["stats"] = stats
-            snapshot = json.loads(json.dumps({**self._config, "logs": self._logs[-300:]}, ensure_ascii=False))
+            snapshot = json.loads(json.dumps({
+                **self._config,
+                "logs": self._logs[-300:],
+                "runtime_config": {
+                    "revision": self._runtime_revision,
+                    "task_snapshot_mode": True,
+                    "last_hot_reload": self._last_hot_reload,
+                },
+            }, ensure_ascii=False))
         self._redact_outlook_pools(snapshot)
         return snapshot
 
@@ -278,7 +337,7 @@ class RegisterService:
     def sync_mailbox_pool(self) -> dict:
         with self._lock:
             self._push_runtime_config()
-            self._save()
+            self._mark_hot_reload("mail")
             return self.get()
 
     def update(self, updates: dict) -> dict:
@@ -378,8 +437,23 @@ class RegisterService:
             except Exception:
                 pass
 
+    @staticmethod
+    def _inventory_signature() -> tuple:
+        signature: list[tuple[str, int, int]] = []
+        for path in (registered_account_store.REGISTERED_ACCOUNTS_FILE, partial_account_store.PARTIAL_ACCOUNTS_FILE):
+            try:
+                stat = path.stat()
+                signature.append((str(path), int(stat.st_mtime_ns), int(stat.st_size)))
+            except OSError:
+                signature.append((str(path), 0, 0))
+        return tuple(signature)
+
     def _pool_metrics(self) -> dict:
-        registered = list_registered_accounts()
+        signature = self._inventory_signature()
+        with self._lock:
+            if signature == self._pool_metrics_signature and self._pool_metrics_cache:
+                return dict(self._pool_metrics_cache)
+        registered = list_registered_accounts(include_secret=False)
         partial = partial_account_store.list_partial_accounts(include_secret=False)
         available = 0
         quota = 0.0
@@ -394,13 +468,17 @@ class RegisterService:
                 remaining = 0.0
             if remaining > 0:
                 quota += remaining
-        return {
+        metrics = {
             "current_quota": round(quota, 2),
             "current_available": available,
             "registered_total": len(registered),
             "partial_total": len(partial),
             "stored_total": len(registered) + len(partial),
         }
+        with self._lock:
+            self._pool_metrics_signature = signature
+            self._pool_metrics_cache = dict(metrics)
+        return metrics
 
     @staticmethod
     def _target_quota_increment(result: dict) -> float:
@@ -424,8 +502,8 @@ class RegisterService:
             return current_quota >= float(cfg.get("target_quota") or 1)
         return False
 
-    def _run_registration_task(self, task_index: int, proxy: str, assignment: dict, target_mode: str) -> dict:
-        result = openai_register.worker(task_index, proxy, assignment)
+    def _run_registration_task(self, task_index: int, proxy: str, assignment: dict, target_mode: str, task_config: dict) -> dict:
+        result = openai_register.worker(task_index, proxy, assignment, runtime_config=task_config)
         if not result.get("ok") or target_mode not in {"available", "quota"}:
             return result
         account = result.get("result") if isinstance(result.get("result"), dict) else {}
@@ -496,43 +574,45 @@ class RegisterService:
         return True
 
     def _run(self) -> None:
-        threads = int(self.get()["threads"])
+        threads = int(self._control_snapshot()["threads"])
         submitted, done, success, fail = 0, 0, 0, 0
         current_available = 0
         current_quota = 0.0
         with ThreadPoolExecutor(max_workers=threads) as executor:
             futures: dict[object, int] = {}
             while True:
-                cfg = self.get()
-                while self.get()["enabled"] and not self._target_reached(cfg, submitted, current_available, current_quota) and len(futures) < threads:
+                cfg = self._control_snapshot()
+                while self._is_enabled() and not self._target_reached(cfg, submitted, current_available, current_quota) and len(futures) < threads:
                     busy_slots = set(futures.values())
                     slot = next((candidate for candidate in range(threads) if candidate not in busy_slots), len(futures) % max(1, threads))
                     task_index = submitted + 1
                     assignment = proxy_pool_store.assign_proxy(task_index, fallback=str(cfg.get("proxy") or ""), total_threads=threads, slot_index=slot, purpose="registration")
-                    if not self.get()["enabled"]:
+                    if not self._is_enabled():
                         self._append_log(f"[任务{task_index}/线程{slot + 1}] 已停止，取消提交已完成代理预检的任务", "yellow")
                         break
                     if assignment.get("error"):
                         self._append_log(f"[任务{task_index}/线程{slot + 1}] 代理分配失败：{assignment.get('error')}", "yellow")
                     if assignment.get("managed_failure") and not assignment.get("proxy"):
                         time.sleep(max(0.2, min(2.0, float(cfg.get("retry_delay") or 1.0))))
-                        cfg = self.get()
+                        cfg = self._control_snapshot()
                         continue
                     submitted = task_index
                     if assignment.get("warning"):
                         self._append_log(f"[任务{submitted}/线程{slot + 1}] 代理池提示：{assignment.get('warning')}", "yellow")
                     if assignment.get("source") not in {"", "fallback"}:
                         self._append_log(f"[任务{submitted}/线程{slot + 1}] 分配代理节点：{assignment.get('label') or assignment.get('node_id') or '代理节点'}", "yellow")
+                    task_config = self._task_config_snapshot()
                     future = executor.submit(
                         self._run_registration_task,
                         submitted,
                         str(assignment.get("proxy") or ""),
                         assignment,
                         str(cfg.get("mode") or "total").strip().lower(),
+                        task_config,
                     )
                     futures[future] = slot
                 self._bump(running=len(futures), done=done, success=success, fail=fail, current_available=current_available, current_quota=round(current_quota, 2), **{key: value for key, value in self._pool_metrics().items() if key in {"registered_total", "partial_total", "stored_total"}})
-                if not futures and (not self.get()["enabled"] or self._target_reached(cfg, submitted, current_available, current_quota)):
+                if not futures and (not self._is_enabled() or self._target_reached(cfg, submitted, current_available, current_quota)):
                     break
                 if not futures:
                     time.sleep(max(1, int(cfg.get("check_interval") or 5)))

@@ -22,6 +22,7 @@ from services.register_service import register_service
 from services.registered_account_store import (
     account_matches_selector,
     account_pool,
+    account_pool_page,
     clear_registered_accounts,
     delete_registered_account,
     import_registered_accounts,
@@ -439,6 +440,13 @@ def create_router() -> APIRouter:
     k12_config_store.ensure_migrated()
     router = APIRouter()
 
+    def proxy_pool_changed(proxy_pool: dict) -> dict:
+        return {"proxy_pool": proxy_pool, "hot_reload": register_service.hot_reload_proxy_config()}
+
+    def reject_disruptive_proxy_action() -> None:
+        if register_service.is_running():
+            raise HTTPException(status_code=409, detail="注册任务运行中，不能启动、停止或切换底层代理进程；可继续保存节点和代理池配置，后续任务会自动使用新配置")
+
     @router.get("/api/register")
     async def get_register_config(authorization: str | None = Header(default=None)):
         require_admin(authorization)
@@ -497,9 +505,10 @@ def create_router() -> APIRouter:
         return {"mailboxes": mailbox_pool_store.list_mailboxes()}
 
     @router.get("/api/outlook-mailboxes")
-    async def list_outlook_mailboxes(authorization: str | None = Header(default=None)):
+    async def list_outlook_mailboxes(limit: int = Query(default=0, ge=0, le=500), offset: int = Query(default=0, ge=0), authorization: str | None = Header(default=None)):
         require_admin(authorization)
-        return {"mailboxes": mailbox_pool_store.list_outlook_mailboxes()}
+        mailboxes = mailbox_pool_store.list_outlook_mailboxes_page(limit, offset) if limit > 0 else mailbox_pool_store.list_outlook_mailboxes()
+        return {"mailboxes": mailboxes}
 
     @router.post("/api/outlook-mailboxes/messages")
     async def get_outlook_mailbox_messages(body: OutlookMailboxMessagesRequest, authorization: str | None = Header(default=None)):
@@ -661,14 +670,16 @@ def create_router() -> APIRouter:
         return {"mailboxes": mailboxes, "register": register}
 
     @router.get("/api/accounts")
-    async def list_accounts(authorization: str | None = Header(default=None)):
+    async def list_accounts(limit: int = Query(default=0, ge=0, le=500), offset: int = Query(default=0, ge=0), authorization: str | None = Header(default=None)):
         require_admin(authorization)
-        return {"account_pool": account_pool()}
+        pool = account_pool_page(limit, offset) if limit > 0 else account_pool()
+        return {"account_pool": pool}
 
     @router.get("/api/partial-accounts")
-    async def list_partial_accounts(authorization: str | None = Header(default=None)):
+    async def list_partial_accounts(limit: int = Query(default=0, ge=0, le=500), offset: int = Query(default=0, ge=0), authorization: str | None = Header(default=None)):
         require_admin(authorization)
-        return {"partial_account_pool": partial_account_store.partial_account_pool(include_secret=True)}
+        pool = partial_account_store.partial_account_pool_page(limit, offset, include_secret=True) if limit > 0 else partial_account_store.partial_account_pool(include_secret=True)
+        return {"partial_account_pool": pool}
 
     @router.post("/api/partial-accounts/import")
     def import_partial_accounts(body: AccountImportRequest, authorization: str | None = Header(default=None)):
@@ -1407,7 +1418,7 @@ def create_router() -> APIRouter:
     @router.post("/api/proxy-pool")
     async def update_proxy_pool(body: ProxyPoolUpdateRequest, authorization: str | None = Header(default=None)):
         require_admin(authorization)
-        return {"proxy_pool": proxy_pool_store.update_proxy_pool_config(body.model_dump(exclude_none=True))}
+        return proxy_pool_changed(proxy_pool_store.update_proxy_pool_config(body.model_dump(exclude_none=True)))
 
     @router.post("/api/proxy-pool/import-subscriptions")
     async def import_proxy_subscriptions(body: ProxySubscriptionImportRequest, authorization: str | None = Header(default=None)):
@@ -1418,18 +1429,18 @@ def create_router() -> APIRouter:
         elif body.allow_private:
             items = [{**item, "allow_private": bool(item.get("allow_private", True))} for item in items]
         if body.text and not items:
-            return {"proxy_pool": proxy_pool_store.import_subscription_text(body.text, name=body.name or "手动订阅")}
-        return {"proxy_pool": proxy_pool_store.add_subscriptions(items, fetch=body.fetch is not False)}
+            return proxy_pool_changed(proxy_pool_store.import_subscription_text(body.text, name=body.name or "手动订阅"))
+        return proxy_pool_changed(proxy_pool_store.add_subscriptions(items, fetch=body.fetch is not False))
 
     @router.post("/api/proxy-pool/import-nodes")
     async def import_proxy_nodes(body: ProxyNodesImportRequest, authorization: str | None = Header(default=None)):
         require_admin(authorization)
-        return {"proxy_pool": proxy_pool_store.import_node_text(body.text)}
+        return proxy_pool_changed(proxy_pool_store.import_node_text(body.text))
 
     @router.post("/api/proxy-pool/sync-mihomo")
     async def sync_proxy_pool_mihomo(authorization: str | None = Header(default=None)):
         require_admin(authorization)
-        return {"proxy_pool": proxy_pool_store.sync_mihomo_nodes()}
+        return proxy_pool_changed(proxy_pool_store.sync_mihomo_nodes())
 
     @router.get("/api/proxy-pool/managed-mihomo/status")
     async def managed_mihomo_status(authorization: str | None = Header(default=None)):
@@ -1449,6 +1460,7 @@ def create_router() -> APIRouter:
     @router.post("/api/proxy-pool/managed-mihomo/start")
     async def start_managed_mihomo(body: ManagedMihomoRequest, authorization: str | None = Header(default=None)):
         require_admin(authorization)
+        reject_disruptive_proxy_action()
         store = proxy_pool_store.get_proxy_pool_config(include_secret=True)
         requested_threads = body.threads if body.threads is not None else register_service.get().get("threads")
         threads = max(1, min(50, int(requested_threads or 1)))
@@ -1458,6 +1470,7 @@ def create_router() -> APIRouter:
     @router.post("/api/proxy-pool/managed-mihomo/stop")
     async def stop_managed_mihomo(authorization: str | None = Header(default=None)):
         require_admin(authorization)
+        reject_disruptive_proxy_action()
         return {"managed_mihomo": managed_mihomo_service.managed_mihomo_manager.stop(), "proxy_pool": proxy_pool_store.get_proxy_pool_config()}
 
     @router.post("/api/proxy-pool/preview-assignments")
@@ -1484,17 +1497,17 @@ def create_router() -> APIRouter:
     @router.post("/api/proxy-pool/clear-nodes")
     async def clear_proxy_nodes(authorization: str | None = Header(default=None)):
         require_admin(authorization)
-        return {"proxy_pool": proxy_pool_store.clear_nodes()}
+        return proxy_pool_changed(proxy_pool_store.clear_nodes())
 
     @router.delete("/api/proxy-pool/nodes/{node_id}")
     async def delete_proxy_node(node_id: str, authorization: str | None = Header(default=None)):
         require_admin(authorization)
-        return {"proxy_pool": proxy_pool_store.delete_node(node_id)}
+        return proxy_pool_changed(proxy_pool_store.delete_node(node_id))
 
     @router.delete("/api/proxy-pool/subscriptions/{subscription_id}")
     async def delete_proxy_subscription(subscription_id: str, authorization: str | None = Header(default=None)):
         require_admin(authorization)
-        return {"proxy_pool": proxy_pool_store.delete_subscription(subscription_id)}
+        return proxy_pool_changed(proxy_pool_store.delete_subscription(subscription_id))
 
     @router.get("/api/proxy-controller")
     async def get_proxy_controller(authorization: str | None = Header(default=None)):
@@ -1509,6 +1522,7 @@ def create_router() -> APIRouter:
     @router.post("/api/proxy-controller/rotate")
     async def rotate_proxy_controller(authorization: str | None = Header(default=None)):
         require_admin(authorization)
+        reject_disruptive_proxy_action()
         return {"proxy_controller": proxy_controller.rotate_proxy("manual")}
 
     return router

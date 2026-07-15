@@ -108,6 +108,44 @@ class RegisterProductModeTests(unittest.TestCase):
         add_registered.assert_not_called()
         import_warehouses.assert_not_called()
 
+    def test_worker_keeps_runtime_config_snapshot_during_hot_reload(self) -> None:
+        observed: list[dict] = []
+
+        class SnapshotRegistrar(_FakeRegistrar):
+            def register_free_wu(self, index: int) -> dict:
+                observed.append(openai_register._mail_config())
+                openai_register.config.update({
+                    "mail": {"registration_source": "cloudflare_temp_email"},
+                    "mailbox_group": "new-group",
+                    "product_mode": "finished",
+                })
+                observed.append(openai_register._mail_config())
+                return super().register_free_wu(index)
+
+        runtime_config = {
+            **openai_register.config,
+            "mail": {"registration_source": "outlook_token", "mailbox_group": "old-group"},
+            "mailbox_group": "old-group",
+            "register_mode": "free",
+            "product_mode": "partial",
+        }
+        saved = {"email": "new@example.com", "status": "oauth_missing", "product_mode": "partial"}
+        with (
+            patch.object(openai_register, "PlatformRegistrar", SnapshotRegistrar),
+            patch.object(openai_register, "step"),
+            patch.object(openai_register, "log"),
+            patch.object(openai_register.partial_account_store, "upsert_partial_account", return_value=saved) as upsert,
+            patch.object(openai_register, "add_registered_account"),
+            patch.object(openai_register, "_maybe_import_registered_account_to_warehouses"),
+        ):
+            result = openai_register.worker(8, runtime_config=runtime_config)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual([item["registration_source"] for item in observed], ["outlook_token", "outlook_token"])
+        self.assertEqual([item["mailbox_group"] for item in observed], ["old-group", "old-group"])
+        self.assertEqual(upsert.call_args.args[0]["product_mode"], "partial")
+        self.assertEqual(openai_register._active_config()["product_mode"], "finished")
+
     def test_registration_saves_proxy_node_snapshot(self) -> None:
         openai_register.config.update({"register_mode": "free", "product_mode": "partial", "proxy": ""})
         saved = {"email": "new@example.com", "status": "oauth_missing", "product_mode": "partial"}

@@ -102,6 +102,20 @@ class AtomicJsonStoreTests(unittest.TestCase):
 
             self.assertEqual(json.loads(path.read_text(encoding="utf-8")), {"schema_version": 2, "value": "new"})
 
+    def test_unchanged_file_reuses_parsed_json_and_external_change_invalidates(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "state.json"
+            path.write_text('{"value": 1}\n', encoding="utf-8")
+
+            with patch("services.atomic_json_store.json.loads", wraps=json.loads) as loads:
+                self.assertEqual(read_json(path, {}), {"value": 1})
+                self.assertEqual(read_json(path, {}), {"value": 1})
+                self.assertEqual(loads.call_count, 1)
+
+                path.write_text('{"value": 2, "changed": true}\n', encoding="utf-8")
+                self.assertEqual(read_json(path, {}), {"value": 2, "changed": True})
+                self.assertEqual(loads.call_count, 2)
+
 
 if __name__ == "__main__":
     unittest.main()

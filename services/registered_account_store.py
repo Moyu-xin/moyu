@@ -4,6 +4,7 @@ import base64
 import hashlib
 import json
 import time
+from copy import deepcopy
 from datetime import datetime, timezone
 from threading import Lock
 from typing import Any
@@ -14,6 +15,8 @@ from services.config import DATA_DIR
 
 REGISTERED_ACCOUNTS_FILE = DATA_DIR / "registered_accounts.json"
 _lock = Lock()
+_pool_cache_lock = Lock()
+_pool_cache: tuple[tuple[str, int, int], float, dict[str, Any]] | None = None
 
 
 SECRET_KEYS = {"access_token", "refresh_token", "id_token", "password", "session_token"}
@@ -102,6 +105,14 @@ def _load() -> list[dict[str, Any]]:
 def _save(items: list[dict[str, Any]]) -> None:
     REGISTERED_ACCOUNTS_FILE.parent.mkdir(parents=True, exist_ok=True)
     write_json(REGISTERED_ACCOUNTS_FILE, items, schema_version=1)
+
+
+def _source_signature() -> tuple[str, int, int]:
+    try:
+        stat = REGISTERED_ACCOUNTS_FILE.stat()
+        return str(REGISTERED_ACCOUNTS_FILE), int(stat.st_mtime_ns), int(stat.st_size)
+    except OSError:
+        return str(REGISTERED_ACCOUNTS_FILE), 0, 0
 
 
 def _safe_json(value: Any) -> Any:
@@ -424,8 +435,38 @@ def _stats(accounts: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def account_pool() -> dict[str, Any]:
+    global _pool_cache
+    signature = _source_signature()
+    now = time.monotonic()
+    with _pool_cache_lock:
+        if _pool_cache and _pool_cache[0] == signature and _pool_cache[1] > now:
+            return deepcopy(_pool_cache[2])
     accounts = list_registered_accounts(include_secret=True)
-    return {"accounts": accounts, "stats": _stats(accounts)}
+    result = {"accounts": accounts, "stats": _stats(accounts)}
+    with _pool_cache_lock:
+        _pool_cache = (signature, now + 5.0, deepcopy(result))
+    return result
+
+
+def account_pool_page(limit: int = 100, offset: int = 0, *, include_secret: bool = True) -> dict[str, Any]:
+    page_limit = max(1, min(500, int(limit or 100)))
+    page_offset = max(0, int(offset or 0))
+    with _lock:
+        raw_items = [item for item in _load() if isinstance(item, dict)]
+    selected = raw_items[page_offset:page_offset + page_limit]
+    accounts = [_public(item, include_secret=include_secret) for item in (_normalize(raw) for raw in selected) if item]
+    total = len(raw_items)
+    return {
+        "accounts": accounts,
+        "stats": {"total": total},
+        "page_info": {
+            "offset": page_offset,
+            "limit": page_limit,
+            "returned": len(accounts),
+            "total": total,
+            "partial": page_offset + len(accounts) < total,
+        },
+    }
 
 
 def add_registered_account(account: dict[str, Any]) -> None:

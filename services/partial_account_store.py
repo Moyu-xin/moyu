@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
+from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock
@@ -14,6 +16,8 @@ from services.config import DATA_DIR
 
 PARTIAL_ACCOUNTS_FILE = DATA_DIR / "partial_accounts.json"
 _lock = Lock()
+_pool_cache_lock = Lock()
+_pool_cache: dict[bool, tuple[tuple[str, int, int], float, dict[str, Any]]] = {}
 OAUTH_PARTIAL_STATUSES = {"oauth_failed", "oauth_missing", "token_exchange_failed"}
 ALIVE_HEALTH_STATUSES = {"ok", "alive", "healthy"}
 TERMINAL_HEALTH_STATUSES = {
@@ -77,6 +81,14 @@ def _load() -> list[dict[str, Any]]:
 def _save(items: list[dict[str, Any]]) -> None:
     PARTIAL_ACCOUNTS_FILE.parent.mkdir(parents=True, exist_ok=True)
     write_json(PARTIAL_ACCOUNTS_FILE, items, schema_version=1)
+
+
+def _source_signature() -> tuple[str, int, int]:
+    try:
+        stat = PARTIAL_ACCOUNTS_FILE.stat()
+        return str(PARTIAL_ACCOUNTS_FILE), int(stat.st_mtime_ns), int(stat.st_size)
+    except OSError:
+        return str(PARTIAL_ACCOUNTS_FILE), 0, 0
 
 
 def _preview(value: object, keep: int = 6) -> str:
@@ -314,6 +326,12 @@ def select_partial_accounts(selectors: list[object] | None = None, *, include_se
 
 
 def partial_account_pool(include_secret: bool = True) -> dict[str, Any]:
+    signature = _source_signature()
+    now = time.monotonic()
+    with _pool_cache_lock:
+        cached = _pool_cache.get(bool(include_secret))
+        if cached and cached[0] == signature and cached[1] > now:
+            return deepcopy(cached[2])
     items = list_partial_accounts(include_secret=include_secret)
     stats: dict[str, int] = {
         "total": len(items),
@@ -342,7 +360,31 @@ def partial_account_pool(include_secret: bool = True) -> dict[str, Any]:
             stats["health_dead"] += 1
         else:
             stats["health_unknown"] += 1
-    return {"items": items, "stats": stats}
+    result = {"items": items, "stats": stats}
+    with _pool_cache_lock:
+        _pool_cache[bool(include_secret)] = (signature, now + 5.0, deepcopy(result))
+    return result
+
+
+def partial_account_pool_page(limit: int = 100, offset: int = 0, *, include_secret: bool = True) -> dict[str, Any]:
+    page_limit = max(1, min(500, int(limit or 100)))
+    page_offset = max(0, int(offset or 0))
+    with _lock:
+        raw_items = [item for item in _load() if isinstance(item, dict)]
+    selected = raw_items[page_offset:page_offset + page_limit]
+    items = [_public(item, include_secret=include_secret) for item in (_normalize(raw) for raw in selected) if item]
+    total = len(raw_items)
+    return {
+        "items": items,
+        "stats": {"total": total},
+        "page_info": {
+            "offset": page_offset,
+            "limit": page_limit,
+            "returned": len(items),
+            "total": total,
+            "partial": page_offset + len(items) < total,
+        },
+    }
 
 
 def update_partial_account(selector: object, updates: dict[str, Any]) -> dict[str, Any] | None:

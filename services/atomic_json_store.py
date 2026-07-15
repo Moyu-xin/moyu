@@ -9,6 +9,8 @@ from typing import Any, Callable
 
 _locks_guard = threading.Lock()
 _path_locks: dict[str, threading.RLock] = {}
+_cache_guard = threading.Lock()
+_json_cache: dict[str, tuple[tuple[int, int], Any]] = {}
 
 
 class JsonStoreReadError(RuntimeError):
@@ -23,6 +25,20 @@ def _lock_for(path: Path) -> threading.RLock:
             lock = threading.RLock()
             _path_locks[key] = lock
         return lock
+
+
+def _cache_key(path: Path) -> str:
+    return str(path.resolve()).lower()
+
+
+def _signature(path: Path) -> tuple[int, int]:
+    stat = path.stat()
+    return int(stat.st_mtime_ns), int(stat.st_size)
+
+
+def _invalidate_cache(path: Path) -> None:
+    with _cache_guard:
+        _json_cache.pop(_cache_key(path), None)
 
 
 def _write_bytes(path: Path, content: bytes) -> None:
@@ -64,6 +80,7 @@ def write_json(
                 os.replace(backup_temp, backup_path)
             _write_bytes(temp, content)
             os.replace(temp, target)
+            _invalidate_cache(target)
         finally:
             temp.unlink(missing_ok=True)
             backup_temp.unlink(missing_ok=True)
@@ -94,9 +111,25 @@ def read_json(
     lock = _lock_for(target)
     with lock:
         try:
+            signature = _signature(target)
+            cache_key = _cache_key(target)
+            with _cache_guard:
+                cached = _json_cache.get(cache_key)
+            if cached and cached[0] == signature:
+                data = deepcopy(cached[1])
+                if expected_schema_version is not None and isinstance(data, dict):
+                    version = data.get("schema_version")
+                    if version is not None and int(version) > int(expected_schema_version):
+                        raise JsonStoreReadError(
+                            f"{target.name} schema_version={version} is newer than supported version {expected_schema_version}"
+                        )
+                return data
             data = parse(target)
             if expected_schema_version is not None and (not isinstance(data, dict) or data.get("schema_version") is None):
                 write_json(target, data, schema_version=expected_schema_version)
+            else:
+                with _cache_guard:
+                    _json_cache[cache_key] = (signature, deepcopy(data))
             return data
         except JsonStoreReadError:
             # A newer schema is valid data that this version cannot interpret.

@@ -7,6 +7,10 @@ import { TopNav } from "@/components/top-nav";
 export const metadata: Metadata = {
   title: "摸鱼机",
   description: "本地注册、邮箱配置、账号库存与测活控制台",
+  icons: {
+    icon: [{ url: "/moyu-mark.svg", type: "image/svg+xml" }],
+    shortcut: "/moyu-mark.svg",
+  },
 };
 
 export const viewport: Viewport = {

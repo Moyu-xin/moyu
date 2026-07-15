@@ -29,8 +29,9 @@ import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { BrandMark } from "@/components/brand-mark";
 import webConfig from "@/constants/common-env";
-import { checkSystemGit, fetchVersion, restartSystem, type RegisterConfig } from "@/lib/api";
+import { checkSystemGit, fetchVersion, prefetchManagementData, restartSystem, type RegisterConfig } from "@/lib/api";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 import { getStoredAuthKey } from "@/store/auth";
 
@@ -125,11 +126,13 @@ function ModuleViewTabs<T extends string>({
   value,
   options,
   onChange,
+  onPrefetch,
 }: {
   label: string;
   value: T;
   options: Array<{ value: T; label: string; icon: typeof UserPlus }>;
   onChange: (value: T) => void;
+  onPrefetch?: (value: T) => void;
 }) {
   return (
     <div role="tablist" aria-label={label} className="grid grid-cols-2 border border-slate-200 bg-white p-1 shadow-sm sm:inline-grid sm:min-w-[360px]">
@@ -143,6 +146,8 @@ function ModuleViewTabs<T extends string>({
             role="tab"
             aria-selected={selected}
             onClick={() => onChange(option.value)}
+            onPointerEnter={() => onPrefetch?.(option.value)}
+            onFocus={() => onPrefetch?.(option.value)}
             className={`flex h-10 items-center justify-center gap-2 px-3 text-sm font-semibold transition ${selected ? "bg-slate-950 text-white" : "text-slate-600 hover:bg-slate-50 hover:text-slate-950"}`}
           >
             <Icon className="size-4" />
@@ -340,6 +345,7 @@ function RegisterPageContent() {
   const [mailView, setMailView] = useState<MailView>("inventory");
   const [accountView, setAccountView] = useState<AccountView>("inventory");
   const [warehouseView, setWarehouseView] = useState<WarehouseView>("config");
+  const [residentViews, setResidentViews] = useState<Set<string>>(() => new Set(["register"]));
   const [sidebarWidth, setSidebarWidth] = useState(284);
   const [isResizing, setIsResizing] = useState(false);
   const [appVersion, setAppVersion] = useState("1.0");
@@ -354,6 +360,11 @@ function RegisterPageContent() {
   }, []);
 
   const currentView = (section: ManageSection) => section === "mail" ? mailView : section === "accounts" ? accountView : section === "warehouse" ? warehouseView : "";
+
+  const keepResident = (section: ManageSection, view = currentView(section)) => {
+    const key = view ? `${section}:${view}` : section;
+    setResidentViews((current) => current.has(key) ? current : new Set([...current, key]));
+  };
 
   const storeLocation = (section: ManageSection, view = currentView(section)) => {
     try {
@@ -370,12 +381,13 @@ function RegisterPageContent() {
   };
 
   const selectSection = (section: ManageSection) => {
+    keepResident(section);
     setActiveSection(section);
     storeLocation(section);
   };
 
-  const selectMailView = (view: MailView) => { setMailView(view); storeLocation("mail", view); };
-  const selectAccountView = (view: AccountView) => { setAccountView(view); storeLocation("accounts", view); };
+  const selectMailView = (view: MailView) => { keepResident("mail", view); setMailView(view); storeLocation("mail", view); };
+  const selectAccountView = (view: AccountView) => { keepResident("accounts", view); setAccountView(view); storeLocation("accounts", view); };
   const selectWarehouseView = (view: WarehouseView) => { setWarehouseView(view); storeLocation("warehouse", view); };
 
   useEffect(() => {
@@ -408,7 +420,10 @@ function RegisterPageContent() {
       if (candidate === "mail" && ["inventory", "config"].includes(requestedView)) setMailView(requestedView as MailView);
       if (candidate === "accounts" && ["inventory", "partials"].includes(requestedView)) setAccountView(requestedView as AccountView);
       if (candidate === "warehouse" && ["config", "management"].includes(requestedView)) setWarehouseView(requestedView as WarehouseView);
-      if (candidate) setActiveSection(candidate);
+      if (candidate) {
+        keepResident(candidate, requestedView || currentView(candidate));
+        setActiveSection(candidate);
+      }
     } catch {
       // ignore browser state failures
     }
@@ -451,9 +466,7 @@ function RegisterPageContent() {
         <aside className="flex flex-col overflow-hidden rounded-2xl border border-slate-200/80 bg-white/90 shadow-[0_18px_55px_-40px_rgba(15,23,42,0.45)] backdrop-blur lg:sticky lg:top-4 lg:h-[calc(100dvh-118px)] lg:min-w-0 lg:rounded-[30px]">
           <div className="hidden border-b border-slate-200/80 p-5 lg:block">
             <div className="flex items-center gap-3">
-              <div className="flex size-12 items-center justify-center rounded-[18px] bg-emerald-500 text-white shadow-[0_16px_30px_-20px_rgba(5,150,105,0.75)]">
-                <UserPlus className="size-5" />
-              </div>
+              <BrandMark className="size-12 drop-shadow-[0_14px_18px_rgba(15,23,42,0.18)]" />
               <div>
                 <p className="flex items-center gap-2 text-xs font-medium text-slate-500">本地控制台 <Badge variant="outline" className="h-5 rounded-md px-1.5 text-[10px]">v{appVersion}</Badge></p>
                 <h1 className="mt-1 text-lg font-semibold tracking-tight text-slate-950">{T.app}</h1>
@@ -480,6 +493,8 @@ function RegisterPageContent() {
                   aria-selected={isActive}
                   aria-controls={`register-section-${item.key}`}
                   onClick={() => selectSection(item.key)}
+                  onPointerEnter={() => void prefetchManagementData(item.key, currentView(item.key))}
+                  onFocus={() => void prefetchManagementData(item.key, currentView(item.key))}
                   className={`group flex min-w-0 w-full flex-col items-center gap-1 rounded-xl border px-1 py-2 text-center outline-none transition duration-200 focus-visible:ring-[3px] focus-visible:ring-emerald-100 lg:flex-row lg:gap-3 lg:rounded-2xl lg:px-3 lg:py-3 lg:text-left ${
                     isActive
                       ? "border-emerald-200 bg-emerald-50 text-emerald-950 shadow-sm"
@@ -553,16 +568,16 @@ function RegisterPageContent() {
             </div>
           </div> : null}
 
-          {activeSection === "mail" ? <ModuleViewTabs label="邮箱模块" value={mailView} onChange={selectMailView} options={[{ value: "inventory", label: "微软邮箱库存", icon: Mails }, { value: "config", label: "邮箱配置", icon: Mail }]} /> : null}
-          {activeSection === "accounts" ? <ModuleViewTabs label="账号模块" value={accountView} onChange={selectAccountView} options={[{ value: "inventory", label: "成品账号", icon: Boxes }, { value: "partials", label: "半成品账号", icon: Clock3 }]} /> : null}
+          {activeSection === "mail" ? <ModuleViewTabs label="邮箱模块" value={mailView} onChange={selectMailView} onPrefetch={(view) => void prefetchManagementData("mail", view)} options={[{ value: "inventory", label: "微软邮箱库存", icon: Mails }, { value: "config", label: "邮箱配置", icon: Mail }]} /> : null}
+          {activeSection === "accounts" ? <ModuleViewTabs label="账号模块" value={accountView} onChange={selectAccountView} onPrefetch={(view) => void prefetchManagementData("accounts", view)} options={[{ value: "inventory", label: "成品账号", icon: Boxes }, { value: "partials", label: "半成品账号", icon: Clock3 }]} /> : null}
           {activeSection === "warehouse" ? <ModuleViewTabs label="中转仓库模块" value={warehouseView} onChange={selectWarehouseView} options={[{ value: "config", label: "仓库配置", icon: Warehouse }, { value: "management", label: "账号管理", icon: ListChecks }]} /> : null}
 
           {activeSection === "register" ? <RegisterCard /> : null}
           {activeSection === "proxy" ? <ProxyPoolCard /> : null}
-          {activeSection === "mail" && mailView === "inventory" ? <OutlookMailboxInventoryCard /> : null}
+          {residentViews.has("mail:inventory") ? <div className={activeSection === "mail" && mailView === "inventory" ? "" : "hidden"}><OutlookMailboxInventoryCard active={activeSection === "mail" && mailView === "inventory"} /></div> : null}
           {activeSection === "mail" && mailView === "config" ? <MailboxPoolCard /> : null}
-          {activeSection === "accounts" && accountView === "inventory" ? <AccountPoolCard /> : null}
-          {activeSection === "accounts" && accountView === "partials" ? <PartialAccountCard /> : null}
+          {residentViews.has("accounts:inventory") ? <div className={activeSection === "accounts" && accountView === "inventory" ? "" : "hidden"}><AccountPoolCard active={activeSection === "accounts" && accountView === "inventory"} /></div> : null}
+          {residentViews.has("accounts:partials") ? <div className={activeSection === "accounts" && accountView === "partials" ? "" : "hidden"}><PartialAccountCard active={activeSection === "accounts" && accountView === "partials"} /></div> : null}
           {activeSection === "garbage" ? <GarbageHealthCard /> : null}
           {activeSection === "plus" ? <PlusLinkCard /> : null}
           {activeSection === "warehouse" && warehouseView === "config" ? <WarehouseConfigCard /> : null}

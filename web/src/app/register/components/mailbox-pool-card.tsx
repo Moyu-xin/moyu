@@ -83,7 +83,10 @@ export function MailboxPoolCard() {
       const data = await updateMailProviderConfigs(configs);
       setConfigs({ ...defaultConfigs(), ...data.provider_configs });
       setRegisterConfig(data.register);
-      toast.success("邮箱提供商配置已保存");
+      const hotReload = data.register.runtime_config?.last_hot_reload;
+      toast.success(hotReload?.running
+        ? `邮箱配置已热更新至 r${hotReload.revision}，进行中任务保持原配置`
+        : "邮箱提供商配置已保存，下次任务直接生效");
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "保存邮箱提供商配置失败");
     } finally {

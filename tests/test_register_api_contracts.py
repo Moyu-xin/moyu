@@ -46,6 +46,7 @@ class RegisterApiContractTests(unittest.TestCase):
         client = self._client()
         with (
             patch.object(register_api, "require_admin"),
+            patch.object(register_api.register_service, "is_running", return_value=False),
             patch.object(register_api.proxy_pool_store, "get_proxy_pool_config", return_value={}),
             patch.object(register_api.managed_mihomo_service.managed_mihomo_manager, "start", return_value={"running": 2}) as start,
         ):
@@ -53,6 +54,61 @@ class RegisterApiContractTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         start.assert_called_once_with(2, {})
+
+    def test_managed_mihomo_stop_is_blocked_while_registration_runs(self) -> None:
+        client = self._client()
+        with (
+            patch.object(register_api, "require_admin"),
+            patch.object(register_api.register_service, "is_running", return_value=True),
+            patch.object(register_api.managed_mihomo_service.managed_mihomo_manager, "stop") as stop,
+        ):
+            response = client.post("/api/proxy-pool/managed-mihomo/stop")
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("注册任务运行中", response.json()["detail"])
+        stop.assert_not_called()
+
+    def test_proxy_config_update_reports_hot_reload(self) -> None:
+        client = self._client()
+        hot_reload = {"revision": 7, "running": True, "task_snapshot_mode": True}
+        with (
+            patch.object(register_api, "require_admin"),
+            patch.object(register_api.proxy_pool_store, "update_proxy_pool_config", return_value={"enabled": True}),
+            patch.object(register_api.register_service, "hot_reload_proxy_config", return_value=hot_reload),
+        ):
+            response = client.post("/api/proxy-pool", json={"enabled": True})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["hot_reload"], hot_reload)
+
+    def test_large_inventory_preview_endpoints_forward_paging(self) -> None:
+        client = self._client()
+        mailbox_pool = {"items": [{"email": "mail@example.com"}], "page_info": {"partial": True}}
+        account_result = {"accounts": [{"email": "done@example.com"}], "page_info": {"partial": True}}
+        partial_result = {"items": [{"email": "partial@example.com"}], "page_info": {"partial": True}}
+        with (
+            patch.object(register_api, "require_admin"),
+            patch.object(register_api.mailbox_pool_store, "list_outlook_mailboxes_page", return_value=mailbox_pool) as mail_page,
+            patch.object(register_api, "account_pool_page", return_value=account_result) as account_page,
+            patch.object(register_api.partial_account_store, "partial_account_pool_page", return_value=partial_result) as partial_page,
+        ):
+            mail_response = client.get("/api/outlook-mailboxes?limit=100&offset=20")
+            account_response = client.get("/api/accounts?limit=100&offset=20")
+            partial_response = client.get("/api/partial-accounts?limit=100&offset=20")
+
+        self.assertEqual(mail_response.json()["mailboxes"], mailbox_pool)
+        self.assertEqual(account_response.json()["account_pool"], account_result)
+        self.assertEqual(partial_response.json()["partial_account_pool"], partial_result)
+        mail_page.assert_called_once_with(100, 20)
+        account_page.assert_called_once_with(100, 20)
+        partial_page.assert_called_once_with(100, 20, include_secret=True)
+
+    def test_large_inventory_preview_rejects_unbounded_limit(self) -> None:
+        client = self._client()
+        with patch.object(register_api, "require_admin"):
+            response = client.get("/api/accounts?limit=501")
+
+        self.assertEqual(response.status_code, 422)
 
     def test_sub2api_partial_result_remains_structured_http_success(self) -> None:
         client = self._client()

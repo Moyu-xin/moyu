@@ -3,7 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from services.register_service import RegisterService, _normalize
 
@@ -91,6 +91,32 @@ class RegisterTargetTests(unittest.TestCase):
         self.assertEqual(snapshot["stats"]["registered_total"], 1)
         self.assertEqual(snapshot["stats"]["partial_total"], 1)
         self.assertEqual(snapshot["stats"]["stored_total"], 2)
+
+    def test_unchanged_inventory_metrics_are_reused(self) -> None:
+        with (
+            patch("services.register_service.list_registered_accounts", return_value=[]) as registered,
+            patch("services.register_service.partial_account_store.list_partial_accounts", return_value=[]) as partial,
+        ):
+            self.service.get()
+            self.service.get()
+        registered.assert_called_once_with(include_secret=False)
+        partial.assert_called_once_with(include_secret=False)
+
+    def test_proxy_hot_reload_preserves_running_tasks(self) -> None:
+        runner = Mock()
+        runner.is_alive.return_value = True
+        self.service._runner = runner
+        self.service._config["enabled"] = True
+        self.service._config["stats"]["running"] = 3
+
+        status = self.service.hot_reload_proxy_config()
+        snapshot = self.service.get()
+
+        self.assertTrue(status["running"])
+        self.assertEqual(status["preserved_running_tasks"], 3)
+        self.assertEqual(status["applies_to"], "new_tasks")
+        self.assertTrue(status["task_snapshot_mode"])
+        self.assertEqual(snapshot["runtime_config"]["last_hot_reload"]["revision"], status["revision"])
 
     def test_start_rejects_empty_selected_mailbox_group_before_launch(self) -> None:
         projected = {

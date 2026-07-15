@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState, type ChangeEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
 import { Activity, ArrowDown, ArrowUp, ArrowUpDown, Clock3, Copy, Download, KeyRound, LoaderCircle, RefreshCw, Send, ShieldAlert, Trash2, Upload, X, Zap } from "lucide-react";
 import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
@@ -313,7 +313,8 @@ function jsonFileName(account: AccountItem) {
   return `account-${email}-${account.inventory_id || Date.now()}.json`;
 }
 
-export function AccountPoolCard() {
+export function AccountPoolCard({ active = true }: { active?: boolean }) {
+  const loadedRef = useRef(false);
   const [pool, setPool] = useState<AccountPool | null>(null);
   const [inventory, setInventory] = useState<AccountInventoryState | null>(null);
   const [loading, setLoading] = useState(true);
@@ -459,14 +460,22 @@ export function AccountPoolCard() {
     setHealthConcurrency(Math.max(1, Math.min(64, Number(nextInventory.settings.concurrency || 10))));
   };
 
-  const load = async (silent = false, includeAccounts = true) => {
+  const load = async (silent = false, includeAccounts = true, preview = false) => {
     if (!silent) setLoading(true);
     try {
       if (includeAccounts) {
-        const [poolData, invData] = await Promise.all([fetchAccountPool(), fetchAccountHealth().catch(() => null)]);
+        const [poolData, invData] = await Promise.all([fetchAccountPool({ force: silent, preview }), fetchAccountHealth().catch(() => null)]);
         setPool(poolData.account_pool);
-        if (selectedAccountId && !poolData.account_pool.accounts.some((item) => accountSelector(item) === selectedAccountId)) setSelectedAccountId("");
+        setSelectedAccountId((current) => current && !poolData.account_pool.accounts.some((item) => accountSelector(item) === current) ? "" : current);
         applyInventory(invData?.inventory);
+        if (preview && poolData.account_pool.page_info?.partial) {
+          window.setTimeout(() => {
+            void fetchAccountPool({ force: true }).then((fullData) => {
+              setPool(fullData.account_pool);
+              setSelectedAccountId((current) => current && !fullData.account_pool.accounts.some((item) => accountSelector(item) === current) ? "" : current);
+            }).catch(() => undefined);
+          }, 600);
+        }
       } else {
         const invData = await fetchAccountHealth();
         applyInventory(invData.inventory);
@@ -479,10 +488,13 @@ export function AccountPoolCard() {
   };
 
   useEffect(() => {
-    void load(false, true);
+    if (!active) return;
+    const firstLoad = !loadedRef.current;
+    if (firstLoad) void load(false, true, true).finally(() => { loadedRef.current = true; });
+    else setLoading(false);
     const timer = window.setInterval(() => void load(true, false), 6000);
     return () => window.clearInterval(timer);
-  }, []);
+  }, [active]);
 
   const doImportContent = async (text: string, label = "导入", source: "text" | "file" = "text") => {
     if (!text.trim()) return toast.error("请选择文件或粘贴账号内容");

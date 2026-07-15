@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowDownAZ,
   Clock3,
@@ -115,7 +115,8 @@ function saveTextFile(name: string, text: string) {
   URL.revokeObjectURL(url);
 }
 
-export function OutlookMailboxInventoryCard() {
+export function OutlookMailboxInventoryCard({ active = true }: { active?: boolean }) {
+  const loadedRef = useRef(false);
   const [pool, setPool] = useState<MailboxPool | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -199,13 +200,22 @@ export function OutlookMailboxInventoryCard() {
   }, [batchGroup, groups, importGroup, managedGroup]);
   useEffect(() => { setRenamedGroup(managedGroup); }, [managedGroup]);
 
-  const load = async (silent = false) => {
+  const load = async (silent = false, preview = false) => {
     if (!silent) setLoading(true);
     try {
-      const data = await fetchOutlookMailboxPool();
+      const data = await fetchOutlookMailboxPool({ force: silent, preview });
       setPool(data.mailboxes);
       setSelectedEmails((current) => current.filter((email) => data.mailboxes.items.some((item) => item.email === email)));
       setSelectedEmail((current) => current && data.mailboxes.items.some((item) => item.email === current) ? current : data.mailboxes.items[0]?.email || "");
+      if (preview && data.mailboxes.page_info?.partial) {
+        window.setTimeout(() => {
+          void fetchOutlookMailboxPool({ force: true }).then((fullData) => {
+            setPool(fullData.mailboxes);
+            setSelectedEmails((current) => current.filter((email) => fullData.mailboxes.items.some((item) => item.email === email)));
+            setSelectedEmail((current) => current && fullData.mailboxes.items.some((item) => item.email === current) ? current : fullData.mailboxes.items[0]?.email || "");
+          }).catch(() => undefined);
+        }, 600);
+      }
     } catch (error) {
       if (!silent) toast.error(error instanceof Error ? error.message : "加载微软邮箱库存失败");
     } finally {
@@ -214,10 +224,13 @@ export function OutlookMailboxInventoryCard() {
   };
 
   useEffect(() => {
-    void load();
-    const timer = window.setInterval(() => void load(true), 10000);
+    if (!active) return;
+    const firstLoad = !loadedRef.current;
+    if (firstLoad) void load(false, true).finally(() => { loadedRef.current = true; });
+    else setLoading(false);
+    const timer = window.setInterval(() => void load(true), 15000);
     return () => window.clearInterval(timer);
-  }, []);
+  }, [active]);
 
   const toggleEmail = (email: string) => setSelectedEmails((current) => current.includes(email) ? current.filter((item) => item !== email) : [...current, email]);
   const togglePage = () => setSelectedEmails((current) => allPageSelected ? current.filter((email) => !pageEmails.includes(email)) : Array.from(new Set([...current, ...pageEmails])));

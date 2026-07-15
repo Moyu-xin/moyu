@@ -69,6 +69,28 @@ type RequestOptions = {
   redirectOnUnauthorized?: boolean;
 };
 
+type CachedRequestOptions = {
+  maxAgeMs?: number;
+  force?: boolean;
+};
+
+type CacheEntry = {
+  expiresAt: number;
+  value?: unknown;
+  pending?: Promise<unknown>;
+};
+
+const responseCache = new Map<string, CacheEntry>();
+let cacheGeneration = 0;
+
+export function invalidateRequestCache(pathPrefix = "") {
+  cacheGeneration += 1;
+  for (const key of responseCache.keys()) {
+    const path = key.slice(key.indexOf("\n") + 1);
+    if (!pathPrefix || path.startsWith(pathPrefix)) responseCache.delete(key);
+  }
+}
+
 export async function httpRequest<T>(path: string, options: RequestOptions = {}) {
   const { method = "GET", body, headers, redirectOnUnauthorized = true } = options;
   const config: RequestConfig = {
@@ -79,5 +101,29 @@ export async function httpRequest<T>(path: string, options: RequestOptions = {})
     redirectOnUnauthorized,
   };
   const response = await request.request<T>(config);
+  if (!["GET", "HEAD"].includes(String(method).toUpperCase())) invalidateRequestCache();
   return response.data;
+}
+
+export async function cachedHttpRequest<T>(path: string, options: CachedRequestOptions = {}) {
+  const { maxAgeMs = 10_000, force = false } = options;
+  const authKey = await getStoredAuthKey();
+  const cacheKey = `${authKey || ""}\n${path}`;
+  const current = responseCache.get(cacheKey);
+  if (current?.pending) return current.pending as Promise<T>;
+  if (!force && current?.value !== undefined && current.expiresAt > Date.now()) return current.value as T;
+
+  const generation = cacheGeneration;
+  const pending = httpRequest<T>(path);
+  responseCache.set(cacheKey, { expiresAt: 0, pending });
+  try {
+    const value = await pending;
+    if (generation === cacheGeneration) {
+      responseCache.set(cacheKey, { expiresAt: Date.now() + Math.max(0, maxAgeMs), value });
+    }
+    return value;
+  } catch (error) {
+    if (generation === cacheGeneration) responseCache.delete(cacheKey);
+    throw error;
+  }
 }

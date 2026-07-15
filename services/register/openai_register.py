@@ -9,6 +9,8 @@ import string
 import threading
 import time
 import uuid
+from contextvars import ContextVar
+from copy import deepcopy
 from datetime import datetime, timezone
 from html.parser import HTMLParser
 from pathlib import Path
@@ -71,6 +73,11 @@ print_lock = threading.Lock()
 stats_lock = threading.Lock()
 stats = {"done": 0, "success": 0, "fail": 0, "start_time": 0.0}
 register_log_sink = None
+_task_runtime_config: ContextVar[dict[str, Any] | None] = ContextVar("register_task_runtime_config", default=None)
+
+
+def _active_config() -> dict[str, Any]:
+    return _task_runtime_config.get() or config
 
 common_headers = {
     "accept": "application/json",
@@ -298,18 +305,20 @@ def _truthy(value: object, fallback: bool = True) -> bool:
 
 
 def _mail_config(register_proxy: str = "", register_mode: str = "") -> dict:
-    mail = config["mail"] if isinstance(config.get("mail"), dict) else {}
+    active = _active_config()
+    mail = active["mail"] if isinstance(active.get("mail"), dict) else {}
     use_register_proxy = _truthy(mail.get("api_use_register_proxy"), True)
     proxy = str(register_proxy or "").strip() if use_register_proxy else ""
     result = {**mail, "api_use_register_proxy": use_register_proxy, "proxy": proxy}
-    result["mailbox_group"] = str(config.get("mailbox_group") or mail.get("mailbox_group") or "").strip()
+    result["mailbox_group"] = str(active.get("mailbox_group") or mail.get("mailbox_group") or "").strip()
     if register_mode:
         result["register_mode"] = register_mode
     return result
 
 
 def _mailbox_group(mailbox: dict | None = None) -> str:
-    return str((mailbox or {}).get("mailbox_group") or config.get("mailbox_group") or (config.get("mail") if isinstance(config.get("mail"), dict) else {}).get("mailbox_group") or "").strip()
+    active = _active_config()
+    return str((mailbox or {}).get("mailbox_group") or active.get("mailbox_group") or (active.get("mail") if isinstance(active.get("mail"), dict) else {}).get("mailbox_group") or "").strip()
 
 
 def _classify_auth_state_from_url(url: str) -> str:
@@ -699,7 +708,7 @@ class PlatformRegistrar:
             "status": resolved_status,
             "reason": str(error or "")[:800],
             "source": "register",
-            "register_mode": str(config.get("register_mode") or ("k12" if config.get("k12_mode") else "free")),
+            "register_mode": str(_active_config().get("register_mode") or ("k12" if _active_config().get("k12_mode") else "free")),
             "mailbox_group": _mailbox_group(mailbox),
             "proxy": self.proxy,
             "client_id": platform_oauth_client_id,
@@ -1454,7 +1463,7 @@ class PlatformRegistrar:
                 "session_token": str(session_data.get("sessionToken") or session_data.get("session_token") or _session_cookie_value(self.session, "__Secure-next-auth.session-token") or _session_cookie_value(self.session, "next-auth.session-token") or "").strip(),
                 "source_type": "web",
                 "register_mode": "free",
-                "product_mode": str(config.get("product_mode") or "partial"),
+                "product_mode": str(_active_config().get("product_mode") or "partial"),
                 "mailbox_group": _mailbox_group(mailbox),
                 "provider": str(mailbox.get("provider") or ""),
                 "provider_label": str(mailbox.get("label") or mailbox.get("provider_ref") or ""),
@@ -1962,8 +1971,9 @@ class PlatformRegistrar:
                 raise
             self.oauth_completed = True
             k12_result: dict[str, Any] | None = None
-            reg_mode = str(config.get("register_mode") or "free")
-            if bool(config.get("k12_mode")) or reg_mode == "k12":
+            active = _active_config()
+            reg_mode = str(active.get("register_mode") or "free")
+            if bool(active.get("k12_mode")) or reg_mode == "k12":
                 try:
                     k12_result = k12_service.request_k12_join(
                         session=self.session,
@@ -2006,7 +2016,7 @@ class PlatformRegistrar:
             "refresh_token": str(tokens.get("refresh_token") or "").strip(),
             "id_token": str(tokens.get("id_token") or "").strip(),
             "source_type": "web",
-            "register_mode": str(config.get("register_mode") or ("k12" if config.get("k12_mode") else "free")),
+            "register_mode": str(_active_config().get("register_mode") or ("k12" if _active_config().get("k12_mode") else "free")),
             "mailbox_group": _mailbox_group(mailbox),
             "oauth_status": "ok",
             "created_at": datetime.now(timezone.utc).isoformat(),
@@ -2026,8 +2036,9 @@ class PlatformRegistrar:
 
 
 def _maybe_import_registered_account_to_warehouses(index: int, result: dict) -> None:
-    register_mode = str(config.get("register_mode") or "free").strip().lower()
-    product_mode = str(result.get("product_mode") or config.get("product_mode") or "partial").strip().lower()
+    active = _active_config()
+    register_mode = str(active.get("register_mode") or "free").strip().lower()
+    product_mode = str(result.get("product_mode") or active.get("product_mode") or "partial").strip().lower()
     force_finished_import = register_mode == "free" and product_mode == "finished"
     try:
         from services import sub2api_store
@@ -2109,7 +2120,7 @@ def _maybe_import_registered_account_to_warehouses(index: int, result: dict) -> 
 
 
 def _save_free_partial(index: int, result: dict, *, reason: str, oauth_attempted: bool) -> dict:
-    product_mode = str(config.get("product_mode") or "partial").strip().lower()
+    product_mode = str(_active_config().get("product_mode") or "partial").strip().lower()
     reason_text = str(reason or "")[:800]
     payload = {
         **result,
@@ -2143,12 +2154,15 @@ def _save_free_partial(index: int, result: dict, *, reason: str, oauth_attempted
     step(index, "账号已进入半成品库存" + (f"：{reason}" if reason else ""), "yellow" if oauth_attempted else "green")
     return saved
 
-def worker(index: int, proxy_override: str | None = None, proxy_assignment: dict | None = None) -> dict:
+def worker(index: int, proxy_override: str | None = None, proxy_assignment: dict | None = None, *, runtime_config: dict | None = None) -> dict:
+    runtime_token = _task_runtime_config.set(deepcopy(runtime_config) if isinstance(runtime_config, dict) else None)
     start = time.time()
     assignment = proxy_assignment if isinstance(proxy_assignment, dict) else {}
-    active_proxy = str(proxy_override if proxy_override is not None else config.get("proxy") or "").strip()
-    registrar = PlatformRegistrar(active_proxy)
+    active = _active_config()
+    active_proxy = str(proxy_override if proxy_override is not None else active.get("proxy") or "").strip()
+    registrar: PlatformRegistrar | None = None
     try:
+        registrar = PlatformRegistrar(active_proxy)
         step(index, "任务启动")
         if assignment.get("source") not in {"", None, "fallback"}:
             label = assignment.get("label") or assignment.get("node_id") or "代理节点"
@@ -2159,7 +2173,7 @@ def worker(index: int, proxy_override: str | None = None, proxy_assignment: dict
             openai_status = int(assignment.get("openai_status") or 0)
             status_text = f" / OpenAI HTTP {openai_status}" if openai_status else ""
             step(index, f"节点预检通过：地区 {region} / 延迟 {latency}ms{status_text}", "yellow")
-        register_mode = str(config.get("register_mode") or "free").strip().lower()
+        register_mode = str(active.get("register_mode") or "free").strip().lower()
         if register_mode == "free_wu":
             register_mode = "free"
         if register_mode == "free":
@@ -2179,7 +2193,7 @@ def worker(index: int, proxy_override: str | None = None, proxy_assignment: dict
                     "registration_proxy_label": str(registration_proxy.get("label") or registration_proxy.get("node_name") or ""),
                 }
             )
-        product_mode = str(config.get("product_mode") or "partial").strip().lower()
+        product_mode = str(active.get("product_mode") or "partial").strip().lower()
         if register_mode == "free" and product_mode == "partial":
             partial = _save_free_partial(index, result, reason="半成品模式未请求 sub2api OAuth", oauth_attempted=False)
             with stats_lock:
@@ -2257,4 +2271,6 @@ def worker(index: int, proxy_override: str | None = None, proxy_assignment: dict
             log(f"[ERROR] 任务{index} 注册失败，本次耗时{cost:.1f}s，原因: {e}", "red")
         return {"ok": False, "index": index, "error": str(e), "proxy_assignment": assignment}
     finally:
-        registrar.close()
+        if registrar is not None:
+            registrar.close()
+        _task_runtime_config.reset(runtime_token)

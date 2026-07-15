@@ -254,7 +254,8 @@ function jsonFileName(item: PartialAccountItem) {
   return `${String(item.email || "partial-account").replace(/[^a-zA-Z0-9._-]+/g, "_")}.json`;
 }
 
-export function PartialAccountCard() {
+export function PartialAccountCard({ active = true }: { active?: boolean }) {
+  const loadedRef = useRef(false);
   const [pool, setPool] = useState<PartialAccountPool | null>(null);
   const [healthState, setHealthState] = useState<PartialAccountHealthState | null>(null);
   const [loading, setLoading] = useState(true);
@@ -305,14 +306,21 @@ export function PartialAccountCard() {
     setHealthMethod(state.settings.method || "auto");
   };
 
-  const load = async (silent = false, syncDraft = true) => {
+  const load = async (silent = false, syncDraft = true, includePool = true, preview = false) => {
     if (!silent) setLoading(true);
     try {
-      const [poolData, healthData] = await Promise.all([
-        fetchPartialAccountPool(),
-        fetchPartialAccountHealthState(),
-      ]);
-      applyPool(poolData.partial_account_pool);
+      const healthPromise = fetchPartialAccountHealthState();
+      const [poolData, healthData] = includePool
+        ? await Promise.all([fetchPartialAccountPool({ force: silent, preview }), healthPromise])
+        : [null, await healthPromise] as const;
+      if (poolData) {
+        applyPool(poolData.partial_account_pool);
+        if (preview && poolData.partial_account_pool.page_info?.partial) {
+          window.setTimeout(() => {
+            void fetchPartialAccountPool({ force: true }).then((fullData) => applyPool(fullData.partial_account_pool)).catch(() => undefined);
+          }, 600);
+        }
+      }
       setHealthState(healthData.partial_health);
       if (syncDraft || !scheduleDirty.current) syncScheduleSettings(healthData.partial_health);
     } catch (error) {
@@ -323,10 +331,17 @@ export function PartialAccountCard() {
   };
 
   useEffect(() => {
-    void load();
-    const timer = window.setInterval(() => void load(true, false), 10000);
-    return () => window.clearInterval(timer);
-  }, []);
+    if (!active) return;
+    const firstLoad = !loadedRef.current;
+    if (firstLoad) void load(false, true, true, true).finally(() => { loadedRef.current = true; });
+    else setLoading(false);
+    const healthTimer = window.setInterval(() => void load(true, false, false), 5000);
+    const poolTimer = window.setInterval(() => void load(true, false, true), 20000);
+    return () => {
+      window.clearInterval(healthTimer);
+      window.clearInterval(poolTimer);
+    };
+  }, [active]);
 
   const items = pool?.items || [];
   const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds]);

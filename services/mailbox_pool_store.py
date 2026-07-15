@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 import re
+import time
+from copy import deepcopy
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from threading import Lock
@@ -15,12 +17,39 @@ from services.register import mail_provider
 
 MAILBOX_POOL_FILE = DATA_DIR / "mailbox_pool.json"
 _lock = Lock()
+_pool_cache_lock = Lock()
+_pool_cache: dict[tuple[str, bool], tuple[tuple, float, dict[str, Any]]] = {}
 DEFAULT_MAILBOX_GROUP = "默认"
 ALL_GROUP_SENTINELS = {"", "all", "__all__", "全部", "*"}
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _source_signature() -> tuple:
+    signature: list[tuple[str, int, int]] = []
+    for path in (MAILBOX_POOL_FILE, mail_provider.OUTLOOK_TOKEN_USED_FILE):
+        try:
+            stat = path.stat()
+            signature.append((str(path), int(stat.st_mtime_ns), int(stat.st_size)))
+        except OSError:
+            signature.append((str(path), 0, 0))
+    return tuple(signature)
+
+
+def _cached_pool(key: tuple[str, bool], signature: tuple) -> dict[str, Any] | None:
+    with _pool_cache_lock:
+        cached = _pool_cache.get(key)
+        if cached and cached[0] == signature and cached[1] > time.monotonic():
+            return deepcopy(cached[2])
+    return None
+
+
+def _store_cached_pool(key: tuple[str, bool], signature: tuple, result: dict[str, Any]) -> dict[str, Any]:
+    with _pool_cache_lock:
+        _pool_cache[key] = (signature, time.monotonic() + 5.0, deepcopy(result))
+    return result
 
 
 def _key(email: object) -> str:
@@ -221,8 +250,8 @@ def _normalize_provider_configs(raw: Any) -> dict[str, Any]:
     return configs
 
 
-def _load_items() -> list[dict[str, Any]]:
-    store = _load_store()
+def _load_items(store: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    store = store if isinstance(store, dict) else _load_store()
     data = store.get("items") if isinstance(store.get("items"), list) else []
     items: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -450,17 +479,22 @@ def update_provider_configs(updates: dict[str, Any]) -> dict[str, Any]:
                         continue
                     current[update_key] = update_value
                 configs[key] = current
-        _save_store(_load_items(), _normalize_provider_configs(configs), store.get("groups"))
+        _save_store(_load_items(store), _normalize_provider_configs(configs), store.get("groups"))
     return get_provider_configs()
 
 
 def list_mailboxes(*, include_secret: bool = True) -> dict[str, Any]:
+    signature = _source_signature()
+    cache_key = ("all", bool(include_secret))
+    cached = _cached_pool(cache_key, signature)
+    if cached is not None:
+        return cached
     with _lock:
         store = _load_store()
-        items = _load_items()
+        items = _load_items(store)
         configs = store.get("provider_configs") or {}
     states = _state_map()
-    return {
+    result = {
         "items": [_with_state(item, states, include_secret=include_secret) for item in items],
         "stats": _stats(items),
         "groups": _groups(items, store.get("groups")),
@@ -469,6 +503,7 @@ def list_mailboxes(*, include_secret: bool = True) -> dict[str, Any]:
         "default_group": DEFAULT_MAILBOX_GROUP,
         "provider_configs": _public_provider_configs(configs, include_secret=False),
     }
+    return _store_cached_pool(cache_key, signature, result)
 
 
 def _parse_gmail_credentials(text: str) -> list[dict[str, str]]:
@@ -942,17 +977,49 @@ def mail_config_from_pool(*, proxy: str = "", wait_timeout: int | float = 180, w
 
 
 def list_outlook_mailboxes(*, include_secret: bool = True) -> dict[str, Any]:
+    signature = _source_signature()
+    cache_key = ("outlook", bool(include_secret))
+    cached = _cached_pool(cache_key, signature)
+    if cached is not None:
+        return cached
     with _lock:
         store = _load_store()
-        items = [item for item in _load_items() if str(item.get("provider_type") or "") == "outlook_token"]
+        items = [item for item in _load_items(store) if str(item.get("provider_type") or "") == "outlook_token"]
     states = _state_map()
-    return {
+    result = {
         "items": [_with_state(item, states, include_secret=include_secret) for item in items],
         "stats": _stats(items),
         "groups": _groups(items, store.get("groups")),
         "group_records": _group_records_with_counts(items, store.get("groups")),
         "group_stats": _group_stats(items),
         "default_group": DEFAULT_MAILBOX_GROUP,
+    }
+    return _store_cached_pool(cache_key, signature, result)
+
+
+def list_outlook_mailboxes_page(limit: int = 100, offset: int = 0, *, include_secret: bool = True) -> dict[str, Any]:
+    page_limit = max(1, min(500, int(limit or 100)))
+    page_offset = max(0, int(offset or 0))
+    with _lock:
+        store = _load_store()
+        items = [item for item in _load_items(store) if str(item.get("provider_type") or "") == "outlook_token"]
+    states = _state_map()
+    selected = items[page_offset:page_offset + page_limit]
+    total = len(items)
+    return {
+        "items": [_with_state(item, states, include_secret=include_secret) for item in selected],
+        "stats": _stats(items),
+        "groups": _groups(items, store.get("groups")),
+        "group_records": _group_records_with_counts(items, store.get("groups")),
+        "group_stats": _group_stats(items),
+        "default_group": DEFAULT_MAILBOX_GROUP,
+        "page_info": {
+            "offset": page_offset,
+            "limit": page_limit,
+            "returned": len(selected),
+            "total": total,
+            "partial": page_offset + len(selected) < total,
+        },
     }
 
 

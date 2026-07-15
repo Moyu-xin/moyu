@@ -3,6 +3,7 @@ from __future__ import annotations
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
+from starlette.middleware.gzip import GZipMiddleware
 from starlette.responses import RedirectResponse
 
 from api import register, system
@@ -29,6 +30,7 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=5)
     app.include_router(register.create_router())
     app.include_router(system.create_router(app_version))
 
@@ -42,6 +44,7 @@ def create_app() -> FastAPI:
             or clean.startswith("register/")
             or clean.startswith("_next/")
             or clean == "favicon.ico"
+            or clean == "moyu-mark.svg"
         ):
             return RedirectResponse(url="/register/", status_code=307)
 
