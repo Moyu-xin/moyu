@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 import {
   Activity,
+  BellRing,
   Boxes,
   CheckCircle2,
   Clock3,
@@ -31,7 +32,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { BrandMark } from "@/components/brand-mark";
 import webConfig from "@/constants/common-env";
-import { checkSystemGit, fetchVersion, prefetchManagementData, restartSystem, type RegisterConfig } from "@/lib/api";
+import { checkSystemGit, fetchVersion, prefetchManagementData, restartSystem, type RegisterConfig, type SystemGitStatus } from "@/lib/api";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 import { getStoredAuthKey } from "@/store/auth";
 
@@ -79,13 +80,14 @@ const sections: Array<{
   { key: "system", title: "系统设置", description: "监控、维护与版本更新", detail: "管理登录密钥、实时资源监控、日志缓存、Git 更新和项目维护。", icon: Settings },
 ];
 
-function SidebarSystemActions() {
+function SidebarSystemActions({ onGitStatus }: { onGitStatus: (git: SystemGitStatus) => void }) {
   const [busy, setBusy] = useState("");
 
   const checkUpdate = async () => {
     setBusy("check");
     try {
       const { git } = await checkSystemGit();
+      onGitStatus(git);
       if (!git.is_repo) toast.error(git.reason || "当前目录不是 Git 仓库");
       else if (git.update_available) toast.success(`发现 ${git.behind || 0} 个远端更新，请前往系统设置更新`);
       else toast.success("当前已是最新版本");
@@ -349,6 +351,7 @@ function RegisterPageContent() {
   const [sidebarWidth, setSidebarWidth] = useState(284);
   const [isResizing, setIsResizing] = useState(false);
   const [appVersion, setAppVersion] = useState("1.0");
+  const [gitStatus, setGitStatus] = useState<SystemGitStatus | null>(null);
   const shellRef = useRef<HTMLDivElement | null>(null);
   const didLoadSplitRef = useRef(false);
   const active = sections.find((item) => item.key === activeSection) || sections[0];
@@ -357,6 +360,24 @@ function RegisterPageContent() {
 
   useEffect(() => {
     void fetchVersion().then(({ version }) => setAppVersion(version || "1.0")).catch(() => undefined);
+  }, []);
+
+  useEffect(() => {
+    let mounted = true;
+    const refreshGitStatus = async () => {
+      try {
+        const { git } = await checkSystemGit();
+        if (mounted) setGitStatus(git);
+      } catch {
+        // Automatic update checks stay silent; manual checks still report errors.
+      }
+    };
+    void refreshGitStatus();
+    const timer = window.setInterval(() => void refreshGitStatus(), 15 * 60 * 1000);
+    return () => {
+      mounted = false;
+      window.clearInterval(timer);
+    };
   }, []);
 
   const currentView = (section: ManageSection) => section === "mail" ? mailView : section === "accounts" ? accountView : section === "warehouse" ? warehouseView : "";
@@ -472,6 +493,20 @@ function RegisterPageContent() {
                 <h1 className="mt-1 text-lg font-semibold tracking-tight text-slate-950">{T.app}</h1>
               </div>
             </div>
+            {gitStatus?.update_available ? (
+              <button
+                type="button"
+                onClick={() => selectSection("system")}
+                className="mt-4 w-full rounded-2xl border border-amber-300 bg-amber-50 p-3 text-left text-xs leading-5 text-amber-900 outline-none transition hover:border-amber-400 hover:bg-amber-100 focus-visible:ring-[3px] focus-visible:ring-amber-100"
+              >
+                <span className="flex items-center gap-2 font-semibold">
+                  <BellRing className="size-4" />
+                  发现 GitHub 更新
+                  <Badge className="ml-auto border-amber-300 bg-white text-amber-800">{gitStatus.behind || 0}</Badge>
+                </span>
+                <span className="mt-1 block">远端新增 {gitStatus.behind || 0} 个提交，点击前往“系统设置”安全更新。</span>
+              </button>
+            ) : null}
             <div className="mt-4 rounded-2xl border border-emerald-200 bg-emerald-50/80 p-3 text-xs leading-5 text-emerald-800">
               <div className="flex items-center gap-2 font-semibold text-emerald-900">
                 <CheckCircle2 className="size-4" />
@@ -513,7 +548,7 @@ function RegisterPageContent() {
             })}
           </nav>
           <div className="hidden border-t border-slate-200/80 p-3 lg:block">
-            <SidebarSystemActions />
+            <SidebarSystemActions onGitStatus={setGitStatus} />
           </div>
         </aside>
 

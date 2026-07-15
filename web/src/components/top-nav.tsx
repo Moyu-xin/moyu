@@ -3,12 +3,14 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
-import { LogOut, ShieldCheck } from "lucide-react";
+import { ExternalLink, GitFork, LogOut, ShieldCheck } from "lucide-react";
 
 import { BrandMark } from "@/components/brand-mark";
 import { Button } from "@/components/ui/button";
 import { getValidatedAuthSession } from "@/lib/auth-session";
 import { clearStoredAuthSession, type StoredAuthSession } from "@/store/auth";
+
+const GITHUB_REPOSITORY_URL = "https://github.com/Moyu-xin/moyu";
 
 export function TopNav() {
   const pathname = usePathname();
@@ -53,6 +55,18 @@ export function TopNav() {
           </span>
         </Link>
         <nav className="flex min-w-0 items-center justify-end gap-2">
+          <a
+            href={GITHUB_REPOSITORY_URL}
+            target="_blank"
+            rel="noreferrer"
+            aria-label="打开 GitHub 仓库 github.com/Moyu-xin/moyu"
+            title="GitHub 仓库：https://github.com/Moyu-xin/moyu"
+            className="inline-flex size-9 shrink-0 items-center justify-center rounded-xl border border-slate-200 bg-white text-slate-600 shadow-sm transition hover:border-slate-300 hover:bg-slate-50 hover:text-slate-950 md:h-9 md:w-auto md:max-w-[320px] md:gap-2 md:px-3"
+          >
+            <GitFork className="size-4" />
+            <span className="hidden truncate text-xs font-semibold md:block">github.com/Moyu-xin/moyu</span>
+            <ExternalLink className="hidden size-3.5 text-slate-400 md:block" />
+          </a>
           <Link href="/register" className="hidden items-center gap-1.5 rounded-2xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-[13px] font-semibold text-emerald-700 transition hover:bg-emerald-100 sm:inline-flex">
             <ShieldCheck className="size-4" />
             控制台
