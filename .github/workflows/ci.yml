@@ -38,3 +38,42 @@ jobs:
         run: |
           pnpm typecheck
           pnpm build
+
+  docker:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deploy with Docker Compose
+        env:
+          CHATGPT2API_PORT: "18000"
+          CHATGPT2API_INITIAL_AUTH_KEY: moyu666
+        run: sh deploy_server.sh
+      - name: Smoke test deployed service
+        run: |
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent http://127.0.0.1:18000/version > /tmp/moyu-version.json; then
+              break
+            fi
+            sleep 2
+          done
+          curl --fail --silent http://127.0.0.1:18000/version \
+            | python3 -c 'import json, sys; data=json.load(sys.stdin); assert data["version"] == "1.0"'
+          curl --fail --silent --request POST \
+            --header 'Authorization: Bearer moyu666' \
+            --header 'Content-Type: application/json' \
+            --data '{}' \
+            http://127.0.0.1:18000/auth/login \
+            | python3 -c 'import json, sys; data=json.load(sys.stdin); assert data["ok"] is True and data["role"] == "admin"'
+          curl --fail --silent \
+            --header 'Authorization: Bearer moyu666' \
+            http://127.0.0.1:18000/api/system/overview \
+            | python3 -c 'import json, sys; data=json.load(sys.stdin); assert data["app"]["version"] == "1.0" and data["hot_reload"] is True'
+      - name: Show container logs on failure
+        if: failure()
+        run: docker compose logs --no-color
+      - name: Stop test deployment
+        if: always()
+        env:
+          CHATGPT2API_PORT: "18000"
+        run: docker compose down --volumes
