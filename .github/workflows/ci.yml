@@ -23,7 +23,7 @@ jobs:
       - name: Enable Corepack
         run: corepack enable
       - name: Install backend
-        run: python -m pip install -e .
+        run: python -m pip install -e ".[test]"
       - name: Test backend
         env:
           CHATGPT2API_AUTH_KEY: ci-test-key-value
