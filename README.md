@@ -1,3 +1,14 @@
+## 免责声明
+
+本项目仅供学习、研究和技术交流使用，不提供任何账号、支付、代理、短信、邮箱或其他第三方服务资源。
+
+使用者应自行确认其使用方式符合目标网站或平台的服务条款、当地法律法规和相关合规要求。严禁将本项目用于违法违规用途、商业滥用、绕过平台限制、批量注册、攻击、爬取、骚扰、欺诈或任何侵犯他人权益的行为。
+
+项目作者和维护者不对因使用、修改、部署或分发本项目而产生的任何直接或间接后果负责。使用本项目即表示你理解并自行承担全部风险。
+
+如本项目中的内容涉及第三方权益，请通过仓库 Issue 联系处理。
+
+交流群：1062966376
 # 摸鱼机 Moyu 1.0
 
 摸鱼机是一套本地优先的注册任务与账号库存管理面板，集中管理邮箱、代理、注册任务、成品/半成品账号、OAuth、K12、Plus 提链和中转仓库。系统设置提供实时资源监控、内存预测、登录密钥热更新、日志缓存清理、Git 快进更新与本地项目重启。
@@ -94,12 +105,17 @@ corepack pnpm build
 - [Next.js](https://github.com/vercel/next.js)
 - [curl_cffi](https://github.com/lexiforest/curl_cffi)
 - [MetaCubeX/mihomo](https://github.com/MetaCubeX/mihomo)
+- https://github.com/ZeroPointSix/outlookEmailPlus
+- https://github.com/Wei-Shaw/sub2api
+- https://github.com/router-for-me/CLIProxyAPI
+- https://github.com/wenfxl/openai-cpa
+- 以及部分非Github公开项目,感谢以上开发者的开源付出
 
 本项目为独立社区项目，与 OpenAI 无隶属、授权或背书关系。
 
 ## 赞助
 
-赞助方式暂未启用。后续计划与说明见 [SPONSORS.md](SPONSORS.md)。
+暂无，联系方式qq:1553622195
 
 ## 许可证
 
