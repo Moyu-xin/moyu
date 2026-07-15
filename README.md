@@ -10,7 +10,7 @@
 
 交流群：1062966376
 # 摸鱼机 Moyu 1.0
-
+纯AI
 摸鱼机是一套本地优先的注册任务与账号库存管理面板，集中管理邮箱、代理、注册任务、成品/半成品账号、OAuth、K12、Plus 提链和中转仓库。系统设置提供实时资源监控、内存预测、登录密钥热更新、日志缓存清理、Git 快进更新与本地项目重启。
 
 > 默认仅监听 `127.0.0.1:8000`。首次登录密钥为 `moyu666`，登录后请在“系统设置”中更换。
@@ -26,6 +26,17 @@
 - Plus/K12/仓库：批量任务、状态追踪和失败原因记录。
 - 系统设置：密钥热更新、内存监控与预测、日志缓存清理、一键重置、安全 Git 更新。
 - 部署维护：Windows 单命令首次启动、Docker Compose 服务器部署、干净发布包生成和 CI。
+### 部分截图
+<img width="2549" height="1403" alt="image" src="https://github.com/user-attachments/assets/95bcbb09-914d-4de5-90be-4d87c9d8a3e9" />
+
+<img width="2549" height="1403" alt="image" src="https://github.com/user-attachments/assets/f84904e4-419f-4b59-b964-79b3de0e2ec9" />
+
+<img width="2549" height="1403" alt="image" src="https://github.com/user-attachments/assets/f85ab202-58b3-4550-9b00-37cde2dccecb" />
+
+<img width="2549" height="1403" alt="image" src="https://github.com/user-attachments/assets/e3c52f26-146c-4304-9b32-65ce4af7988d" />
+
+
+
 
 ## 快速开始
 
