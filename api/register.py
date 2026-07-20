@@ -15,7 +15,8 @@ logger = logging.getLogger(__name__)
 MAX_WEBHOOK_BODY_BYTES = 5 * 1024 * 1024
 
 from api.support import require_admin
-from services import account_inventory_service, account_oauth_service, cpa_store, garbage_health_service, k12_config_store, mailbox_pool_store, managed_mihomo_service, partial_account_health_service, partial_account_store, plus_link_store, proxy_controller, proxy_pool_store, sub2api_store
+from services import account_inventory_service, account_oauth_service, cpa_store, garbage_health_service, grok2api_store, k12_config_store, mailbox_pool_store, managed_mihomo_service, partial_account_health_service, partial_account_store, paypal_payment_store, plus_link_store, proxy_controller, proxy_pool_store, shipping_account_store, sub2api_store
+from services.grok import grok_solver_manager
 from services.k12_inventory_service import k12_inventory_service
 from services.register import mail_provider
 from services.register_service import register_service
@@ -27,6 +28,9 @@ from services.registered_account_store import (
     delete_registered_account,
     import_registered_accounts,
     list_registered_accounts,
+    mark_accounts_outbound,
+    registration_batches,
+    select_accounts_for_outbound,
     update_registered_account,
 )
 
@@ -44,6 +48,15 @@ class RegisterConfigRequest(BaseModel):
     register_mode: str | None = None
     product_mode: str | None = None
     mailbox_group: str | None = None
+    grok: dict[str, Any] | None = None
+
+
+class GrokSolverRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    action: str
+    url: str | None = None
+    threads: int | None = None
 
 
 class OutlookPoolResetRequest(BaseModel):
@@ -70,6 +83,7 @@ class MailProviderConfigsRequest(BaseModel):
     gmail_oauth: dict[str, Any] | None = None
     ddg_mail: dict[str, Any] | None = None
     duckmail: dict[str, Any] | None = None
+    yyds_mail: dict[str, Any] | None = None
     openai_cpa: dict[str, Any] | None = None
 
 
@@ -174,10 +188,60 @@ class AccountOAuthCompleteRequest(BaseModel):
 
 class AccountSub2ApiImportRequest(BaseModel):
     emails: list[str] | None = None
+    reauthorize_grok: bool = False
 
 
 class AccountCpaImportRequest(BaseModel):
     emails: list[str] | None = None
+
+
+class AccountGrok2ApiImportRequest(BaseModel):
+    emails: list[str] | None = None
+
+
+class InventoryOutboundRequest(BaseModel):
+    quantity: int | None = 0
+    registration_batch_id: str | None = None
+    format: str | None = "sub2api"
+    include_outbound: bool | None = False
+
+
+class ShippingAccountSelectionRequest(BaseModel):
+    selectors: list[str] | None = None
+
+
+class ShippingAccountHealthRequest(BaseModel):
+    selectors: list[str] | None = None
+    concurrency: int | None = 8
+
+
+class ShippingAccountOutboundRequest(BaseModel):
+    selectors: list[str] | None = None
+    quantity: int | None = 0
+    registration_batch_id: str | None = None
+    format: str | None = "sub2api"
+    include_outbound: bool | None = False
+
+
+class ShippingAccountImportRequest(BaseModel):
+    selectors: list[str] | None = None
+    target: str
+
+
+class ShippingStoreConfigRequest(BaseModel):
+    enabled: bool | None = None
+    base_url: str | None = None
+    api_key: str | None = None
+    card_prefix: str | None = None
+    request_timeout: int | None = None
+
+
+class MailboxOutboundRequest(BaseModel):
+    quantity: int | None = 0
+    inventory_batch_id: str | None = None
+    provider_type: str | None = "outlook_token"
+    format: str | None = "credentials"
+    include_outbound: bool | None = False
 
 
 class AccountHealthRequest(BaseModel):
@@ -283,6 +347,16 @@ class CpaConfigRequest(BaseModel):
     notes: str | None = None
 
 
+class Grok2ApiConfigRequest(BaseModel):
+    enabled: bool | None = None
+    base_url: str | None = None
+    username: str | None = None
+    password: str | None = None
+    admin_token: str | None = None
+    skip_ssl_verify: bool | None = None
+    notes: str | None = None
+
+
 class ProxyControllerRequest(BaseModel):
     enabled: bool | None = None
     api_base: str | None = None
@@ -297,6 +371,11 @@ class ProxyPoolUpdateRequest(BaseModel):
     strategy: str | None = None
     node_mode: str | None = None
     fallback_proxy: str | None = None
+    residential_proxy_text: str | None = None
+    residential_proxies: list[str] | None = None
+    residential_provider: str | None = None
+    clear_residential_proxies: bool | None = None
+    plus_subscription_id: str | None = None
     node_blacklist: list[str] | str | None = None
     fastest_mode: bool | None = None
     max_retry_count: int | None = None
@@ -370,21 +449,39 @@ class PlusLinkConfigRequest(BaseModel):
     residential_promotion_proxy: str | None = None
     residential_single_proxy_mode: bool | None = None
     residential_session_ttl_minutes: int | None = None
+    proxy_quality_gate_enabled: bool | None = None
+    proxy_quality_candidate_limit: int | None = None
+    proxy_quality_probe_rounds: int | None = None
+    proxy_quality_max_latency_ms: int | None = None
+    proxy_quality_quarantine_seconds: int | None = None
     residential_via_project_proxy: bool | None = None
     residential_parent_node_filter: str | None = None
+    residential_parent_proxy_override: str | None = None
     residential_via_clash: bool | None = None
     residential_clash_proxy: str | None = None
     proxy: str | None = None
     target_country: str | None = None
     checkout_country: str | None = None
+    provider_country: str | None = None
+    approve_country: str | None = None
     promotion_country: str | None = None
     payment_method_country: str | None = None
     payment_locale: str | None = None
+    checkout_ui_mode: str | None = None
+    stripe_provider_egress: str | None = None
+    stripe_poll_egress: str | None = None
+    post_approve_poll_timeout_seconds: int | None = None
+    enable_playwright_approve_fallback: bool | None = None
+    enable_playwright_redirect_fallback: bool | None = None
+    allow_intermediate_url_fallback: bool | None = None
+    paypal_confirm_mode: str | None = None
+    paypal_confirm_protocol: str | None = None
     concurrency: int | None = None
     timeout_seconds: int | None = None
     checkout_retry_limit: int | None = None
     provider_retry_limit: int | None = None
     matrix_combo_retry_limit: int | None = None
+    smsbower_pm_max_price: float | None = None
     retry_limits_version: int | None = None
     refresh_tokens: bool | None = None
     provider_same_as_target: bool | None = None
@@ -393,6 +490,7 @@ class PlusLinkConfigRequest(BaseModel):
     billing_country_rotation: list[str] | str | None = None
     proxy_country_rotation: list[str] | str | None = None
     require_zero_stripe_amount: bool | None = None
+    require_ipv6_egress: bool | None = None
     strict_same_proxy_ip: bool | None = None
     strict_approve_same_proxy_ip: bool | None = None
 
@@ -403,7 +501,32 @@ class PlusLinkStartRequest(BaseModel):
     manual_accounts: list[dict[str, Any] | str] | None = None
     manual_tokens: list[str] | None = None
     clear_results: bool | None = True
+    persist_config: bool | None = True
     config: dict[str, Any] | None = None
+
+
+class PaypalPaymentConfigRequest(BaseModel):
+    auto_pay_new_links: bool | None = None
+    protocol_country: str | None = None
+    sms_provider: str | None = None
+    proxy_override: str | None = None
+    smsbower_api_key: str | None = None
+    smsbower_max_price: float | None = None
+    max_card_attempts: int | None = None
+    sms_max_attempts: int | None = None
+    flow_attempts: int | None = None
+    concurrency: int | None = None
+
+
+class PaypalPaymentStartRequest(BaseModel):
+    source_task_ids: list[str] | None = None
+    manual_items: list[dict[str, Any] | str] | None = None
+    persist_config: bool | None = True
+    config: dict[str, Any] | None = None
+
+
+class PaypalPhonePoolImportRequest(BaseModel):
+    text: str
 
 
 class GarbageHealthConfigRequest(BaseModel):
@@ -448,7 +571,7 @@ def create_router() -> APIRouter:
             raise HTTPException(status_code=409, detail="注册任务运行中，不能启动、停止或切换底层代理进程；可继续保存节点和代理池配置，后续任务会自动使用新配置")
 
     @router.get("/api/register")
-    async def get_register_config(authorization: str | None = Header(default=None)):
+    def get_register_config(authorization: str | None = Header(default=None)):
         require_admin(authorization)
         return {"register": register_service.get()}
 
@@ -469,6 +592,35 @@ def create_router() -> APIRouter:
         except RuntimeError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
 
+    @router.get("/api/grok/solver")
+    async def get_grok_solver(authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        register = register_service.get()
+        grok = register.get("grok") if isinstance(register.get("grok"), dict) else {}
+        return {"grok_solver": grok_solver_manager.status(str(grok.get("local_solver_url") or "http://127.0.0.1:5072"))}
+
+    @router.post("/api/grok/solver")
+    async def control_grok_solver(body: GrokSolverRequest, authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        action = str(body.action or "").strip().lower()
+        if action in {"stop", "restart"} and register_service.is_running():
+            raise HTTPException(status_code=409, detail="注册任务运行中，请先停止注册任务再控制 Solver")
+        register = register_service.get()
+        grok = register.get("grok") if isinstance(register.get("grok"), dict) else {}
+        url = str(body.url or grok.get("local_solver_url") or "http://127.0.0.1:5072")
+        try:
+            if action == "start":
+                result = grok_solver_manager.start(url, threads=int(body.threads or grok.get("solver_threads") or 1))
+            elif action == "stop":
+                result = grok_solver_manager.stop(url)
+            elif action == "restart":
+                result = grok_solver_manager.restart(url, threads=int(body.threads or grok.get("solver_threads") or 1))
+            else:
+                raise RuntimeError("action must be start, stop or restart")
+        except RuntimeError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        return {"grok_solver": result}
+
     @router.post("/api/register/stop")
     async def stop_register(authorization: str | None = Header(default=None)):
         require_admin(authorization)
@@ -478,6 +630,11 @@ def create_router() -> APIRouter:
     async def reset_register(authorization: str | None = Header(default=None)):
         require_admin(authorization)
         return {"register": register_service.reset()}
+
+    @router.post("/api/register/logs/clear")
+    async def clear_register_logs(authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        return {"register": register_service.clear_logs()}
 
     @router.post("/api/register/outlook-pool/reset")
     async def reset_outlook_pool(body: OutlookPoolResetRequest, authorization: str | None = Header(default=None)):
@@ -491,27 +648,72 @@ def create_router() -> APIRouter:
         async def stream():
             last = ""
             while True:
-                payload = json.dumps(register_service.get(), ensure_ascii=False)
+                snapshot = await asyncio.to_thread(register_service.get)
+                payload = json.dumps(snapshot, ensure_ascii=False)
                 if payload != last:
                     last = payload
                     yield f"data: {payload}\n\n"
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(0.5 if snapshot.get("enabled") else 2.0)
 
         return StreamingResponse(stream(), media_type="text/event-stream")
 
     @router.get("/api/mailboxes")
-    async def list_mailboxes(authorization: str | None = Header(default=None)):
+    def list_mailboxes(authorization: str | None = Header(default=None)):
         require_admin(authorization)
         return {"mailboxes": mailbox_pool_store.list_mailboxes()}
 
     @router.get("/api/outlook-mailboxes")
-    async def list_outlook_mailboxes(limit: int = Query(default=0, ge=0, le=500), offset: int = Query(default=0, ge=0), authorization: str | None = Header(default=None)):
+    def list_outlook_mailboxes(limit: int = Query(default=0, ge=0, le=500), offset: int = Query(default=0, ge=0), authorization: str | None = Header(default=None)):
         require_admin(authorization)
         mailboxes = mailbox_pool_store.list_outlook_mailboxes_page(limit, offset) if limit > 0 else mailbox_pool_store.list_outlook_mailboxes()
         return {"mailboxes": mailboxes}
 
+    @router.get("/api/mailboxes/batches")
+    async def list_mailbox_batches(provider_type: str = Query(default="outlook_token"), authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        return {"batches": mailbox_pool_store.mailbox_batches(provider_type=provider_type)}
+
+    @router.post("/api/mailboxes/outbound")
+    async def outbound_mailboxes(body: MailboxOutboundRequest, authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        export_format = str(body.format or "credentials").strip().lower()
+        if export_format not in {"credentials", "json"}:
+            raise HTTPException(status_code=400, detail="mailbox outbound format must be credentials or json")
+        selected = mailbox_pool_store.select_mailboxes_for_outbound(
+            quantity=int(body.quantity or 0),
+            inventory_batch_id=str(body.inventory_batch_id or ""),
+            provider_type=str(body.provider_type or "outlook_token"),
+            include_outbound=bool(body.include_outbound),
+        )
+        if export_format == "json":
+            payload: Any = selected
+            filename = "mailboxes.json"
+        else:
+            payload = "\n".join(
+                "----".join([
+                    str(item.get("email") or ""),
+                    str(item.get("password") or ""),
+                    str(item.get("client_id") or ""),
+                    *([str(item.get("client_secret") or "")] if str(item.get("provider_type") or "") == "gmail_oauth" else []),
+                    str(item.get("refresh_token") or ""),
+                ])
+                for item in selected
+            )
+            filename = "mailboxes.txt"
+        outbound = mailbox_pool_store.mark_mailboxes_outbound(selected, export_format=export_format)
+        return {
+            "mailbox_outbound": {
+                **outbound,
+                "format": export_format,
+                "count": len(selected),
+                "filename": filename,
+                "data": payload,
+            },
+            "batches": mailbox_pool_store.mailbox_batches(provider_type=str(body.provider_type or "outlook_token")),
+        }
+
     @router.post("/api/outlook-mailboxes/messages")
-    async def get_outlook_mailbox_messages(body: OutlookMailboxMessagesRequest, authorization: str | None = Header(default=None)):
+    def get_outlook_mailbox_messages(body: OutlookMailboxMessagesRequest, authorization: str | None = Header(default=None)):
         require_admin(authorization)
         try:
             result = mailbox_pool_store.recent_outlook_messages(
@@ -525,7 +727,7 @@ def create_router() -> APIRouter:
         return {"mailbox_messages": result}
 
     @router.post("/api/outlook-mailboxes/refresh-token")
-    async def refresh_outlook_mailbox_tokens(body: OutlookMailboxRefreshRequest, authorization: str | None = Header(default=None)):
+    def refresh_outlook_mailbox_tokens(body: OutlookMailboxRefreshRequest, authorization: str | None = Header(default=None)):
         require_admin(authorization)
         try:
             return mailbox_pool_store.refresh_outlook_tokens(
@@ -596,7 +798,7 @@ def create_router() -> APIRouter:
         return {"mailboxes": mailboxes, "register": register}
 
     @router.post("/api/mailboxes/code")
-    async def get_mailbox_code(body: MailboxCodeRequest, authorization: str | None = Header(default=None)):
+    def get_mailbox_code(body: MailboxCodeRequest, authorization: str | None = Header(default=None)):
         require_admin(authorization)
         try:
             result = mailbox_pool_store.latest_verification_code(
@@ -670,13 +872,128 @@ def create_router() -> APIRouter:
         return {"mailboxes": mailboxes, "register": register}
 
     @router.get("/api/accounts")
-    async def list_accounts(limit: int = Query(default=0, ge=0, le=500), offset: int = Query(default=0, ge=0), authorization: str | None = Header(default=None)):
+    def list_accounts(limit: int = Query(default=0, ge=0, le=500), offset: int = Query(default=0, ge=0), authorization: str | None = Header(default=None)):
         require_admin(authorization)
         pool = account_pool_page(limit, offset) if limit > 0 else account_pool()
         return {"account_pool": pool}
 
+    @router.get("/api/accounts/batches")
+    async def list_account_batches(authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        return {"batches": registration_batches()}
+
+    @router.post("/api/accounts/outbound")
+    async def outbound_accounts(body: InventoryOutboundRequest, authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        export_format = str(body.format or "sub2api").strip().lower()
+        if export_format not in {"sub2api", "cpa", "json"}:
+            raise HTTPException(status_code=400, detail="account outbound format must be sub2api, cpa, or json")
+        selected = select_accounts_for_outbound(
+            quantity=int(body.quantity or 0),
+            registration_batch_id=str(body.registration_batch_id or ""),
+            include_outbound=bool(body.include_outbound),
+        )
+        eligible = [item for item in selected if str(item.get("access_token") or "").strip()]
+        if export_format == "sub2api":
+            exported = sub2api_store.export_account_dicts_to_sub2api(eligible)
+            payload = exported.get("data")
+            filename = "sub2api-accounts.json"
+        elif export_format == "cpa":
+            payload = cpa_store.export_account_dicts_to_cpa(eligible)
+            filename = "cpa-auth-files.json"
+        else:
+            payload = eligible
+            filename = "accounts.json"
+        outbound = mark_accounts_outbound(eligible, export_format=export_format)
+        return {
+            "account_outbound": {
+                **outbound,
+                "format": export_format,
+                "count": len(eligible),
+                "skipped": max(0, len(selected) - len(eligible)),
+                "filename": filename,
+                "data": payload,
+            },
+            "batches": registration_batches(),
+        }
+
+    @router.get("/api/shipping-accounts")
+    def list_shipping_accounts(limit: int = Query(default=0, ge=0, le=500), offset: int = Query(default=0, ge=0), authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        return {"shipping_pool": shipping_account_store.pool(include_secret=True, limit=limit, offset=offset)}
+
+    @router.get("/api/shipping-accounts/config")
+    def get_shipping_store_config(authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        return {"shipping_config": shipping_account_store.get_config()}
+
+    @router.post("/api/shipping-accounts/config")
+    def update_shipping_store_config(body: ShippingStoreConfigRequest, authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        return {"shipping_config": shipping_account_store.update_config(body.model_dump(exclude_none=True))}
+
+    @router.post("/api/shipping-accounts/store/test")
+    def test_shipping_store(authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        try:
+            return {"store_test": shipping_account_store.test_store_connection()}
+        except (RuntimeError, ValueError) as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+
+    @router.post("/api/shipping-accounts/health/check")
+    def check_shipping_accounts(body: ShippingAccountHealthRequest, authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        try:
+            return {"shipping_health": shipping_account_store.check_health(body.selectors, concurrency=int(body.concurrency or 8))}
+        except (RuntimeError, ValueError) as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+
+    @router.post("/api/shipping-accounts/import")
+    def import_shipping_accounts(body: ShippingAccountImportRequest, authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        try:
+            return {"shipping_import": shipping_account_store.import_accounts(body.target, body.selectors)}
+        except (RuntimeError, ValueError) as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+
+    @router.post("/api/shipping-accounts/outbound")
+    def outbound_shipping_accounts(body: ShippingAccountOutboundRequest, authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        try:
+            return {
+                "shipping_outbound": shipping_account_store.export_accounts(
+                    selectors=body.selectors,
+                    registration_batch_id=str(body.registration_batch_id or ""),
+                    quantity=int(body.quantity or 0),
+                    format=str(body.format or "sub2api"),
+                    include_outbound=bool(body.include_outbound),
+                )
+            }
+        except (RuntimeError, ValueError) as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+
+    @router.post("/api/shipping-accounts/store/publish")
+    def publish_shipping_accounts(body: ShippingAccountOutboundRequest, authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        try:
+            return {
+                "store_publish": shipping_account_store.publish_to_store(
+                    selectors=body.selectors,
+                    registration_batch_id=str(body.registration_batch_id or ""),
+                    quantity=int(body.quantity or 0),
+                    include_outbound=bool(body.include_outbound),
+                )
+            }
+        except (RuntimeError, ValueError) as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+
+    @router.post("/api/shipping-accounts/delete")
+    def delete_shipping_accounts(body: ShippingAccountSelectionRequest, authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        return {"shipping_pool": shipping_account_store.delete_accounts(body.selectors or [])}
+
     @router.get("/api/partial-accounts")
-    async def list_partial_accounts(limit: int = Query(default=0, ge=0, le=500), offset: int = Query(default=0, ge=0), authorization: str | None = Header(default=None)):
+    def list_partial_accounts(limit: int = Query(default=0, ge=0, le=500), offset: int = Query(default=0, ge=0), authorization: str | None = Header(default=None)):
         require_admin(authorization)
         pool = partial_account_store.partial_account_pool_page(limit, offset, include_secret=True) if limit > 0 else partial_account_store.partial_account_pool(include_secret=True)
         return {"partial_account_pool": pool}
@@ -1046,7 +1363,7 @@ def create_router() -> APIRouter:
         return {"account": result, "account_pool": account_pool()}
 
     @router.post("/api/accounts/{email}/refresh-token")
-    async def refresh_account_token(email: str, authorization: str | None = Header(default=None)):
+    def refresh_account_token(email: str, authorization: str | None = Header(default=None)):
         require_admin(authorization)
         selector = unquote(email)
         accounts = list_registered_accounts(include_secret=True)
@@ -1057,6 +1374,29 @@ def create_router() -> APIRouter:
                 break
         if not account:
             raise HTTPException(status_code=404, detail="account not found")
+        if str(account.get("platform") or "").strip().lower() == "grok":
+            try:
+                refreshed = sub2api_store.refresh_grok_account_oauth(account)
+                result = refreshed["account"]
+                from services.account_inventory_service import _grok_health_and_quota
+
+                probe_result = _grok_health_and_quota(
+                    result,
+                    refresh_quota=False,
+                    proxy=str(refreshed.get("proxy") or ""),
+                )
+                probe_updates = probe_result.get("updates") if isinstance(probe_result, dict) else {}
+                if isinstance(probe_updates, dict) and probe_updates:
+                    result = update_registered_account(selector, probe_updates) or result
+                return {"account": result, "account_pool": account_pool(), "refresh_method": refreshed.get("method")}
+            except Exception as error:
+                update_registered_account(selector, {
+                    "oauth_status": "refresh_failed",
+                    "oauth_refresh_status": "refresh_token_refresh_failed",
+                    "oauth_refresh_error": str(error)[:800],
+                    "token_refresh_required": True,
+                })
+                raise HTTPException(status_code=400, detail=str(error)) from error
         refresh_token = str(account.get("refresh_token") or "").strip()
         if not refresh_token:
             update_registered_account(selector, {"oauth_status": "missing_refresh_token", "oauth_refresh_status": "refresh_token_missing", "oauth_refresh_error": "账号没有 refresh_token", "token_refresh_required": True})
@@ -1117,7 +1457,10 @@ def create_router() -> APIRouter:
     def import_accounts_sub2api(body: AccountSub2ApiImportRequest, authorization: str | None = Header(default=None)):
         require_admin(authorization)
         try:
-            result = sub2api_store.import_accounts_to_sub2api(body.emails)
+            result = sub2api_store.import_accounts_to_sub2api(
+                body.emails,
+                reauthorize_grok=bool(body.reauthorize_grok),
+            )
         except RuntimeError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
         return {"sub2api": result, "account_pool": account_pool()}
@@ -1131,20 +1474,29 @@ def create_router() -> APIRouter:
             raise HTTPException(status_code=400, detail=str(error)) from error
         return {"cpa": result, "account_pool": account_pool()}
 
+    @router.post("/api/accounts/import-grok2api")
+    def import_accounts_grok2api(body: AccountGrok2ApiImportRequest, authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        try:
+            result = grok2api_store.import_accounts_to_grok2api(body.emails)
+        except RuntimeError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        return {"grok2api": result, "account_pool": account_pool()}
+
     @router.get("/api/sub2api-config")
-    async def get_sub2api_config(authorization: str | None = Header(default=None)):
+    def get_sub2api_config(authorization: str | None = Header(default=None)):
         require_admin(authorization)
         return {"sub2api_config": sub2api_store.get_sub2api_config()}
 
     @router.post("/api/sub2api-config")
-    async def update_sub2api_config(body: Sub2ApiConfigRequest, authorization: str | None = Header(default=None)):
+    def update_sub2api_config(body: Sub2ApiConfigRequest, authorization: str | None = Header(default=None)):
         require_admin(authorization)
         updates = body.model_dump(exclude_none=True)
         config = sub2api_store.update_sub2api_config(updates)
         return {"sub2api_config": config, "register": register_service.get()}
 
     @router.post("/api/sub2api/connection/test")
-    async def test_sub2api_connection(authorization: str | None = Header(default=None)):
+    def test_sub2api_connection(authorization: str | None = Header(default=None)):
         require_admin(authorization)
         try:
             return {"sub2api_connection": sub2api_store.test_sub2api_connection()}
@@ -1152,7 +1504,7 @@ def create_router() -> APIRouter:
             raise HTTPException(status_code=400, detail=str(error)) from error
 
     @router.get("/api/sub2api/groups")
-    async def get_sub2api_groups(authorization: str | None = Header(default=None)):
+    def get_sub2api_groups(authorization: str | None = Header(default=None)):
         require_admin(authorization)
         try:
             return {"sub2api_groups": sub2api_store.list_sub2api_groups()}
@@ -1160,7 +1512,7 @@ def create_router() -> APIRouter:
             raise HTTPException(status_code=400, detail=str(error)) from error
 
     @router.get("/api/sub2api/accounts")
-    async def get_sub2api_accounts(
+    def get_sub2api_accounts(
         page: int = Query(default=1, ge=1),
         page_size: int = Query(default=20, ge=1),
         group_id: str = "",
@@ -1175,7 +1527,7 @@ def create_router() -> APIRouter:
             raise HTTPException(status_code=400, detail=str(error)) from error
 
     @router.post("/api/sub2api/accounts/test")
-    async def test_sub2api_accounts(body: Sub2ApiAccountsTestRequest, authorization: str | None = Header(default=None)):
+    def test_sub2api_accounts(body: Sub2ApiAccountsTestRequest, authorization: str | None = Header(default=None)):
         require_admin(authorization)
         try:
             return {"sub2api_test": sub2api_store.test_sub2api_accounts(
@@ -1191,7 +1543,7 @@ def create_router() -> APIRouter:
             raise HTTPException(status_code=400, detail=str(error)) from error
 
     @router.post("/api/sub2api/accounts/usage")
-    async def get_sub2api_accounts_usage(body: WarehouseAccountIdsRequest, authorization: str | None = Header(default=None)):
+    def get_sub2api_accounts_usage(body: WarehouseAccountIdsRequest, authorization: str | None = Header(default=None)):
         require_admin(authorization)
         try:
             return {"sub2api_usage": sub2api_store.get_sub2api_accounts_usage(body.account_ids or [])}
@@ -1199,7 +1551,7 @@ def create_router() -> APIRouter:
             raise HTTPException(status_code=400, detail=str(error)) from error
 
     @router.post("/api/sub2api/accounts/action")
-    async def act_on_sub2api_accounts(body: WarehouseAccountActionRequest, authorization: str | None = Header(default=None)):
+    def act_on_sub2api_accounts(body: WarehouseAccountActionRequest, authorization: str | None = Header(default=None)):
         require_admin(authorization)
         try:
             return {"sub2api_action": sub2api_store.act_on_sub2api_accounts(body.account_ids or [], body.action)}
@@ -1207,17 +1559,17 @@ def create_router() -> APIRouter:
             raise HTTPException(status_code=400, detail=str(error)) from error
 
     @router.get("/api/cpa-config")
-    async def get_cpa_config(authorization: str | None = Header(default=None)):
+    def get_cpa_config(authorization: str | None = Header(default=None)):
         require_admin(authorization)
         return {"cpa_config": cpa_store.get_cpa_config()}
 
     @router.post("/api/cpa-config")
-    async def update_cpa_config(body: CpaConfigRequest, authorization: str | None = Header(default=None)):
+    def update_cpa_config(body: CpaConfigRequest, authorization: str | None = Header(default=None)):
         require_admin(authorization)
         return {"cpa_config": cpa_store.update_cpa_config(body.model_dump(exclude_none=True)), "register": register_service.get()}
 
     @router.post("/api/cpa/connection/test")
-    async def test_cpa_connection(authorization: str | None = Header(default=None)):
+    def test_cpa_connection(authorization: str | None = Header(default=None)):
         require_admin(authorization)
         try:
             return {"cpa_connection": cpa_store.test_cpa_connection()}
@@ -1225,7 +1577,7 @@ def create_router() -> APIRouter:
             raise HTTPException(status_code=400, detail=str(error)) from error
 
     @router.get("/api/cpa/accounts")
-    async def get_cpa_accounts(
+    def get_cpa_accounts(
         page: int = Query(default=1, ge=1),
         page_size: int = Query(default=20, ge=1),
         search: str = "",
@@ -1239,7 +1591,7 @@ def create_router() -> APIRouter:
             raise HTTPException(status_code=400, detail=str(error)) from error
 
     @router.post("/api/cpa/accounts/test")
-    async def test_cpa_accounts(body: CpaAccountsTestRequest, authorization: str | None = Header(default=None)):
+    def test_cpa_accounts(body: CpaAccountsTestRequest, authorization: str | None = Header(default=None)):
         require_admin(authorization)
         try:
             return {"cpa_test": cpa_store.test_cpa_accounts(body.names, apply_policy=bool(body.apply_policy))}
@@ -1247,10 +1599,68 @@ def create_router() -> APIRouter:
             raise HTTPException(status_code=400, detail=str(error)) from error
 
     @router.post("/api/cpa/accounts/action")
-    async def act_on_cpa_accounts(body: WarehouseAccountActionRequest, authorization: str | None = Header(default=None)):
+    def act_on_cpa_accounts(body: WarehouseAccountActionRequest, authorization: str | None = Header(default=None)):
         require_admin(authorization)
         try:
             return {"cpa_action": cpa_store.act_on_cpa_accounts(body.names or [], body.action)}
+        except RuntimeError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+
+    @router.get("/api/grok2api-config")
+    def get_grok2api_config(authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        return {"grok2api_config": grok2api_store.get_grok2api_config()}
+
+    @router.post("/api/grok2api-config")
+    def update_grok2api_config(body: Grok2ApiConfigRequest, authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        return {
+            "grok2api_config": grok2api_store.update_grok2api_config(body.model_dump(exclude_none=True)),
+            "register": register_service.get(),
+        }
+
+    @router.post("/api/grok2api/connection/test")
+    def test_grok2api_connection(authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        try:
+            return {"grok2api_connection": grok2api_store.test_grok2api_connection()}
+        except RuntimeError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+
+    @router.get("/api/grok2api/accounts")
+    def get_grok2api_accounts(
+        page: int = Query(default=1, ge=1),
+        page_size: int = Query(default=20, ge=1, le=200),
+        search: str = "",
+        status: str = "",
+        authorization: str | None = Header(default=None),
+    ):
+        require_admin(authorization)
+        try:
+            return {
+                "grok2api_accounts": grok2api_store.list_grok2api_accounts(
+                    page=page,
+                    page_size=page_size,
+                    search=search,
+                    status=status,
+                )
+            }
+        except RuntimeError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+
+    @router.post("/api/grok2api/accounts/refresh-quotas")
+    def refresh_grok2api_accounts(body: WarehouseAccountIdsRequest, authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        try:
+            return {"grok2api_refresh": grok2api_store.refresh_grok2api_accounts(body.account_ids or [])}
+        except RuntimeError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+
+    @router.post("/api/grok2api/accounts/action")
+    def act_on_grok2api_accounts(body: WarehouseAccountActionRequest, authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        try:
+            return {"grok2api_action": grok2api_store.act_on_grok2api_accounts(body.account_ids or [], body.action)}
         except RuntimeError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
 
@@ -1292,59 +1702,201 @@ def create_router() -> APIRouter:
         return {"k12": k12_inventory_service.reset()}
 
     @router.get("/api/plus-link")
-    async def get_plus_link_state(authorization: str | None = Header(default=None)):
+    def get_plus_link_state(
+        include_inventory: bool = Query(default=True),
+        inventory_limit: int = Query(default=0, ge=0, le=500),
+        compact: bool = Query(default=False),
+        authorization: str | None = Header(default=None),
+    ):
         require_admin(authorization)
-        return {"plus_link": plus_link_store.plus_link_service.get()}
+        return {
+            "plus_link": plus_link_store.plus_link_service.get(
+                include_inventory=include_inventory,
+                inventory_limit=inventory_limit,
+                compact=compact,
+            )
+        }
 
     @router.post("/api/plus-link/config")
-    async def update_plus_link_config(body: PlusLinkConfigRequest, authorization: str | None = Header(default=None)):
+    def update_plus_link_config(body: PlusLinkConfigRequest, authorization: str | None = Header(default=None)):
         require_admin(authorization)
         return {"plus_link": plus_link_store.plus_link_service.update_config(body.model_dump(exclude_none=True))}
 
     @router.post("/api/plus-link/start")
-    async def start_plus_link(body: PlusLinkStartRequest, authorization: str | None = Header(default=None)):
+    def start_plus_link(body: PlusLinkStartRequest, authorization: str | None = Header(default=None)):
         require_admin(authorization)
         return {"plus_link": plus_link_store.plus_link_service.start(body.model_dump(exclude_none=True))}
 
     @router.post("/api/plus-link/stop")
-    async def stop_plus_link(authorization: str | None = Header(default=None)):
+    def stop_plus_link(authorization: str | None = Header(default=None)):
         require_admin(authorization)
         return {"plus_link": plus_link_store.plus_link_service.stop()}
 
     @router.post("/api/plus-link/tasks/{task_id}/pause")
-    async def pause_plus_link_task(task_id: str, authorization: str | None = Header(default=None)):
+    def pause_plus_link_task(task_id: str, authorization: str | None = Header(default=None)):
         require_admin(authorization)
-        return {"plus_link": plus_link_store.plus_link_service.pause_task(task_id)}
+        try:
+            return {"plus_link": plus_link_store.plus_link_service.pause_task(task_id)}
+        except RuntimeError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
 
     @router.post("/api/plus-link/tasks/{task_id}/resume")
-    async def resume_plus_link_task(task_id: str, authorization: str | None = Header(default=None)):
+    def resume_plus_link_task(task_id: str, authorization: str | None = Header(default=None)):
         require_admin(authorization)
-        return {"plus_link": plus_link_store.plus_link_service.resume_task(task_id)}
+        try:
+            return {"plus_link": plus_link_store.plus_link_service.resume_task(task_id)}
+        except RuntimeError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
 
     @router.post("/api/plus-link/tasks/{task_id}/cancel")
-    async def cancel_plus_link_task(task_id: str, authorization: str | None = Header(default=None)):
+    def cancel_plus_link_task(task_id: str, authorization: str | None = Header(default=None)):
         require_admin(authorization)
-        return {"plus_link": plus_link_store.plus_link_service.cancel_task(task_id)}
+        try:
+            return {"plus_link": plus_link_store.plus_link_service.cancel_task(task_id)}
+        except RuntimeError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
 
     @router.post("/api/plus-link/tasks/{task_id}/retry")
-    async def retry_plus_link_task(task_id: str, authorization: str | None = Header(default=None)):
+    def retry_plus_link_task(task_id: str, authorization: str | None = Header(default=None)):
         require_admin(authorization)
-        return {"plus_link": plus_link_store.plus_link_service.retry_task(task_id)}
+        try:
+            return {"plus_link": plus_link_store.plus_link_service.retry_task(task_id)}
+        except RuntimeError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+
+    @router.post("/api/plus-link/retry-failed")
+    def retry_failed_plus_link_tasks(authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        try:
+            return {"plus_link": plus_link_store.plus_link_service.retry_failed_tasks()}
+        except RuntimeError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+
+    @router.post("/api/plus-link/tasks/{task_id}/delete")
+    def delete_plus_link_task(task_id: str, authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        try:
+            return {"plus_link": plus_link_store.plus_link_service.delete_task(task_id)}
+        except RuntimeError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
 
     @router.post("/api/plus-link/clear")
-    async def clear_plus_link(authorization: str | None = Header(default=None)):
+    def clear_plus_link(authorization: str | None = Header(default=None)):
         require_admin(authorization)
         return {"plus_link": plus_link_store.plus_link_service.clear_results()}
 
     @router.post("/api/plus-link/clear-failed")
-    async def clear_failed_plus_link(authorization: str | None = Header(default=None)):
+    def clear_failed_plus_link(authorization: str | None = Header(default=None)):
         require_admin(authorization)
         return {"plus_link": plus_link_store.plus_link_service.clear_failed_results()}
 
     @router.post("/api/plus-link/clear-finished")
-    async def clear_finished_plus_link(authorization: str | None = Header(default=None)):
+    def clear_finished_plus_link(authorization: str | None = Header(default=None)):
         require_admin(authorization)
         return {"plus_link": plus_link_store.plus_link_service.clear_finished_results()}
+
+    @router.get("/api/paypal-payments")
+    def get_paypal_payments(authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        return {"paypal_payments": paypal_payment_store.paypal_payment_service.get()}
+
+    @router.post("/api/paypal-payments/config")
+    async def update_paypal_payment_config(
+        body: PaypalPaymentConfigRequest,
+        authorization: str | None = Header(default=None),
+    ):
+        require_admin(authorization)
+        return {
+            "paypal_payments": paypal_payment_store.paypal_payment_service.update_config(
+                body.model_dump(exclude_none=True)
+            )
+        }
+
+    @router.post("/api/paypal-payments/start")
+    async def start_paypal_payments(
+        body: PaypalPaymentStartRequest,
+        authorization: str | None = Header(default=None),
+    ):
+        require_admin(authorization)
+        try:
+            return {
+                "paypal_payments": paypal_payment_store.paypal_payment_service.start(
+                    body.model_dump(exclude_none=True)
+                )
+            }
+        except (RuntimeError, ValueError) as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+
+    @router.post("/api/paypal-payments/stop")
+    async def stop_paypal_payments(authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        return {"paypal_payments": paypal_payment_store.paypal_payment_service.stop()}
+
+    @router.post("/api/paypal-payments/tasks/{task_id}/cancel")
+    async def cancel_paypal_payment(task_id: str, authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        try:
+            return {"paypal_payments": paypal_payment_store.paypal_payment_service.cancel_task(task_id)}
+        except RuntimeError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+
+    @router.post("/api/paypal-payments/tasks/{task_id}/retry")
+    async def retry_paypal_payment(task_id: str, authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        try:
+            return {"paypal_payments": paypal_payment_store.paypal_payment_service.retry_task(task_id)}
+        except RuntimeError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+
+    @router.post("/api/paypal-payments/tasks/{task_id}/delete")
+    async def delete_paypal_payment(task_id: str, authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        try:
+            return {"paypal_payments": paypal_payment_store.paypal_payment_service.delete_task(task_id)}
+        except RuntimeError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+
+    @router.post("/api/paypal-payments/clear-finished")
+    async def clear_finished_paypal_payments(authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        return {"paypal_payments": paypal_payment_store.paypal_payment_service.clear_finished()}
+
+    @router.post("/api/paypal-payments/phone-pool/import")
+    async def import_paypal_phone_pool(
+        body: PaypalPhonePoolImportRequest,
+        authorization: str | None = Header(default=None),
+    ):
+        require_admin(authorization)
+        try:
+            return paypal_payment_store.paypal_payment_service.import_phone_pool(body.text)
+        except (ValueError, RuntimeError) as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+
+    @router.post("/api/paypal-payments/phone-pool/{entry_id}/reset")
+    async def reset_paypal_phone_pool(
+        entry_id: str,
+        authorization: str | None = Header(default=None),
+    ):
+        require_admin(authorization)
+        try:
+            return {
+                "paypal_payments": paypal_payment_store.paypal_payment_service.reset_phone_pool(entry_id)
+            }
+        except (ValueError, RuntimeError, paypal_payment_store.PhonePoolError) as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+
+    @router.delete("/api/paypal-payments/phone-pool/{entry_id}")
+    async def delete_paypal_phone_pool(
+        entry_id: str,
+        authorization: str | None = Header(default=None),
+    ):
+        require_admin(authorization)
+        try:
+            return {
+                "paypal_payments": paypal_payment_store.paypal_payment_service.delete_phone_pool(entry_id)
+            }
+        except (ValueError, RuntimeError, paypal_payment_store.PhonePoolError) as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
 
     @router.get("/api/garbage-health")
     async def get_garbage_health_state(authorization: str | None = Header(default=None)):
@@ -1395,7 +1947,7 @@ def create_router() -> APIRouter:
             raise HTTPException(status_code=400, detail=str(error)) from error
 
     @router.post("/api/garbage-health/import-sub2api")
-    async def import_garbage_health_sub2api(body: GarbageHealthImportRequest | None = None, authorization: str | None = Header(default=None)):
+    def import_garbage_health_sub2api(body: GarbageHealthImportRequest | None = None, authorization: str | None = Header(default=None)):
         require_admin(authorization)
         try:
             return {"garbage_import": garbage_health_service.garbage_health_service.import_to_sub2api(body.group_id if body else None)}
@@ -1403,7 +1955,7 @@ def create_router() -> APIRouter:
             raise HTTPException(status_code=400, detail=str(error)) from error
 
     @router.post("/api/garbage-health/import-cpa")
-    async def import_garbage_health_cpa(authorization: str | None = Header(default=None)):
+    def import_garbage_health_cpa(authorization: str | None = Header(default=None)):
         require_admin(authorization)
         try:
             return {"garbage_import": garbage_health_service.garbage_health_service.import_to_cpa_inventory()}
@@ -1421,7 +1973,7 @@ def create_router() -> APIRouter:
         return proxy_pool_changed(proxy_pool_store.update_proxy_pool_config(body.model_dump(exclude_none=True)))
 
     @router.post("/api/proxy-pool/import-subscriptions")
-    async def import_proxy_subscriptions(body: ProxySubscriptionImportRequest, authorization: str | None = Header(default=None)):
+    def import_proxy_subscriptions(body: ProxySubscriptionImportRequest, authorization: str | None = Header(default=None)):
         require_admin(authorization)
         items = body.items or []
         if body.url:
@@ -1438,7 +1990,7 @@ def create_router() -> APIRouter:
         return proxy_pool_changed(proxy_pool_store.import_node_text(body.text))
 
     @router.post("/api/proxy-pool/sync-mihomo")
-    async def sync_proxy_pool_mihomo(authorization: str | None = Header(default=None)):
+    def sync_proxy_pool_mihomo(authorization: str | None = Header(default=None)):
         require_admin(authorization)
         return proxy_pool_changed(proxy_pool_store.sync_mihomo_nodes())
 
@@ -1448,7 +2000,7 @@ def create_router() -> APIRouter:
         return {"managed_mihomo": managed_mihomo_service.managed_mihomo_manager.status()}
 
     @router.post("/api/proxy-pool/managed-mihomo/install")
-    async def install_managed_mihomo(authorization: str | None = Header(default=None)):
+    def install_managed_mihomo(authorization: str | None = Header(default=None)):
         require_admin(authorization)
         store = proxy_pool_store.get_proxy_pool_config(include_secret=True)
         managed = dict(store.get("managed_mihomo") or {})
@@ -1458,7 +2010,7 @@ def create_router() -> APIRouter:
         return {"managed_mihomo": managed_mihomo_service.managed_mihomo_manager.status(), "proxy_pool": proxy_pool}
 
     @router.post("/api/proxy-pool/managed-mihomo/start")
-    async def start_managed_mihomo(body: ManagedMihomoRequest, authorization: str | None = Header(default=None)):
+    def start_managed_mihomo(body: ManagedMihomoRequest, authorization: str | None = Header(default=None)):
         require_admin(authorization)
         reject_disruptive_proxy_action()
         store = proxy_pool_store.get_proxy_pool_config(include_secret=True)
@@ -1474,7 +2026,7 @@ def create_router() -> APIRouter:
         return {"managed_mihomo": managed_mihomo_service.managed_mihomo_manager.stop(), "proxy_pool": proxy_pool_store.get_proxy_pool_config()}
 
     @router.post("/api/proxy-pool/preview-assignments")
-    async def preview_proxy_assignments(body: ProxyAssignmentPreviewRequest, authorization: str | None = Header(default=None)):
+    def preview_proxy_assignments(body: ProxyAssignmentPreviewRequest, authorization: str | None = Header(default=None)):
         require_admin(authorization)
         requested_threads = body.threads if body.threads is not None else register_service.get().get("threads")
         threads = max(1, min(50, int(requested_threads or 1)))
@@ -1490,7 +2042,7 @@ def create_router() -> APIRouter:
         }
 
     @router.post("/api/proxy-pool/test")
-    async def test_proxy_node(body: ProxyNodeTestRequest, authorization: str | None = Header(default=None)):
+    def test_proxy_node(body: ProxyNodeTestRequest, authorization: str | None = Header(default=None)):
         require_admin(authorization)
         return {"proxy_test": proxy_pool_store.test_node(body.node_id or "", body.proxy_url or ""), "proxy_pool": proxy_pool_store.get_proxy_pool_config()}
 

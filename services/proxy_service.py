@@ -9,7 +9,7 @@ import threading
 import time
 from typing import Callable, Mapping
 from urllib import request as urllib_request
-from urllib.parse import quote, urlparse
+from urllib.parse import quote, unquote, urlparse
 
 from curl_cffi.requests import Session
 
@@ -30,6 +30,8 @@ def normalize_proxy_url(url: str) -> str:
     candidate = re.sub(r"^(https?|socks5h?|socks):/([^/])", r"\1://\2", candidate, flags=re.IGNORECASE)
     if candidate and "://" not in candidate:
         candidate = _colon_proxy_to_url(candidate)
+    if candidate and "://" in candidate:
+        candidate = _canonical_proxy_url(candidate)
     lowered = candidate.lower()
     if lowered.startswith("socks://"):
         return "socks5h://" + candidate[len("socks://") :]
@@ -431,13 +433,55 @@ def _clean(value: object) -> str:
 
 
 def _colon_proxy_to_url(url: str) -> str:
-    parts = url.split(":", 3)
-    if len(parts) == 4 and parts[1].isdigit():
-        host, port, username, password = parts
-        return f"http://{quote(username, safe='')}:{quote(password, safe='')}@{host}:{port}"
+    candidate = str(url or "").strip()
+    for separator in ("|", ";", ","):
+        parts = [part.strip() for part in candidate.split(separator)]
+        if len(parts) == 4 and parts[1].isdigit():
+            candidate = ":".join(parts)
+            break
+    if "@" in candidate:
+        return _canonical_proxy_url(f"http://{candidate}")
+    parts = candidate.split(":")
+    if len(parts) >= 4 and parts[1].isdigit():
+        host, port, username = parts[:3]
+        password = ":".join(parts[3:])
+        return _build_proxy_url("http", host, port, username, password)
+    if len(parts) >= 4 and parts[-1].isdigit():
+        username, password = parts[:2]
+        host = ":".join(parts[2:-1])
+        port = parts[-1]
+        return _build_proxy_url("http", host, port, username, password)
     if len(parts) == 2 and parts[1].isdigit():
-        return f"http://{url}"
+        return f"http://{candidate}"
     return url
+
+
+def _build_proxy_url(scheme: str, host: str, port: object, username: str = "", password: str = "") -> str:
+    clean_host = str(host or "").strip().strip("[]")
+    if not clean_host or not str(port or "").isdigit():
+        return ""
+    host_part = f"[{clean_host}]" if ":" in clean_host else clean_host
+    auth = ""
+    if username:
+        auth = f"{quote(str(username), safe='-._~')}:{quote(str(password or ''), safe='-._~')}@"
+    return f"{str(scheme or 'http').lower()}://{auth}{host_part}:{int(port)}"
+
+
+def _canonical_proxy_url(url: str) -> str:
+    try:
+        parsed = urlparse(str(url or "").strip())
+        port = parsed.port
+    except ValueError:
+        return str(url or "").strip()
+    if not parsed.scheme or not parsed.hostname or not port:
+        return str(url or "").strip()
+    return _build_proxy_url(
+        parsed.scheme,
+        parsed.hostname,
+        port,
+        unquote(parsed.username or ""),
+        unquote(parsed.password or ""),
+    ) or str(url or "").strip()
 
 
 def _normalize_host(host: str) -> str:

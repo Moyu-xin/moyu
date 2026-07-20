@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
@@ -10,9 +12,11 @@ from api import register, system
 from api.errors import install_exception_handlers
 from api.support import resolve_web_asset
 from services.config import config
+from services.sqlite_store import migrate_data_directory
 
 
 def create_app() -> FastAPI:
+    migrate_data_directory()
     app_version = config.app_version
 
     app = FastAPI(
@@ -33,6 +37,14 @@ def create_app() -> FastAPI:
     app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=5)
     app.include_router(register.create_router())
     app.include_router(system.create_router(app_version))
+
+    @app.on_event("startup")
+    def resume_interrupted_plus_tasks() -> None:
+        if str(os.getenv("CHATGPT2API_AUTO_RESUME_PLUS_TASKS") or "").strip().lower() not in {"1", "true", "yes", "on"}:
+            return
+        from services.plus_link_store import plus_link_service
+
+        plus_link_service.resume_interrupted_tasks()
 
     @app.api_route("/{full_path:path}", methods=["GET", "HEAD"], include_in_schema=False)
     async def serve_web(full_path: str):

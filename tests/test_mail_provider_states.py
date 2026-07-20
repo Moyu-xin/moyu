@@ -71,6 +71,44 @@ class MailProviderStateTests(unittest.TestCase):
         self.assertEqual(credentials[0]["client_secret"], "client-secret")
         self.assertEqual(mail_provider._normalize_gmail_pool(credentials), credentials)
 
+    def test_message_summary_includes_participants_and_full_body(self) -> None:
+        summary = mail_provider._message_public_summary({
+            "provider": "outlook_token",
+            "mailbox": "alias@example.com",
+            "subject": "Account verification",
+            "sender": {"name": "Example Security", "address": "security@example.com"},
+            "to": [
+                {"emailAddress": {"name": "Alias", "address": "alias@example.com"}},
+                "backup@example.com",
+            ],
+            "html_content": "<p>Hello Alias</p><p>Your code is ABC-123.</p>",
+        })
+
+        self.assertIsNotNone(summary)
+        self.assertEqual(summary["sender"], "Example Security <security@example.com>")
+        self.assertEqual(summary["recipients"], ["Alias <alias@example.com>", "backup@example.com"])
+        self.assertEqual(summary["body_text"], "Hello Alias\nYour code is ABC-123.")
+        self.assertEqual(summary["body_preview"], "Hello Alias Your code is ABC-123.")
+
+    def test_graph_participants_keep_names_and_addresses(self) -> None:
+        sender = mail_provider.OutlookTokenProvider._graph_sender({
+            "from": {"emailAddress": {"name": "OpenAI", "address": "noreply@example.com"}},
+        })
+
+        self.assertEqual(sender, "OpenAI <noreply@example.com>")
+
+    def test_openai_registration_modes_only_accept_six_digit_codes(self) -> None:
+        for mode in ("free", "free_wu", "k12"):
+            with self.subTest(mode=mode):
+                self.assertTrue(mail_provider._code_matches_register_mode("030399", mode))
+                self.assertFalse(mail_provider._code_matches_register_mode("ABC-123", mode))
+                self.assertFalse(mail_provider._code_matches_register_mode("XAI0X1", mode))
+                self.assertFalse(mail_provider._code_matches_register_mode("1234567", mode))
+
+    def test_non_openai_registration_modes_keep_alphanumeric_codes(self) -> None:
+        self.assertTrue(mail_provider._code_matches_register_mode("ABC-123", "grok"))
+        self.assertTrue(mail_provider._code_matches_register_mode("XAI0X1", ""))
+
 
 if __name__ == "__main__":
     unittest.main()

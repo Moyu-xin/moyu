@@ -231,7 +231,7 @@ def _require_config() -> dict[str, Any]:
 
 def _is_cpa_account(item: dict[str, Any]) -> bool:
     provider = str(item.get("provider") or item.get("type") or "").strip().lower()
-    return "codex" in provider or "openai" in provider
+    return "codex" in provider or "openai" in provider or "grok" in provider or "xai" in provider
 
 
 def _status_of(item: dict[str, Any]) -> str:
@@ -555,6 +555,8 @@ def _jwt_payload(token: Any) -> dict[str, Any]:
 
 
 def build_cpa_auth_file(account: dict[str, Any]) -> dict[str, Any]:
+    if str(account.get("platform") or "").strip().lower() == "grok":
+        return build_grok_cpa_auth_file(account)
     access_claims = _jwt_payload(account.get("access_token"))
     id_claims = _jwt_payload(account.get("id_token"))
     auth = access_claims.get("https://api.openai.com/auth")
@@ -582,6 +584,41 @@ def build_cpa_auth_file(account: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in result.items() if value not in (None, "")}
 
 
+def build_grok_cpa_auth_file(account: dict[str, Any]) -> dict[str, Any]:
+    access_claims = _jwt_payload(account.get("access_token"))
+    id_claims = _jwt_payload(account.get("id_token"))
+    email = str(account.get("email") or id_claims.get("email") or access_claims.get("email") or "").strip()
+    subject = str(account.get("subject") or id_claims.get("sub") or access_claims.get("sub") or "").strip()
+    expires_at = account.get("token_expires_at") or id_claims.get("exp") or access_claims.get("exp")
+    try:
+        expired = datetime.fromtimestamp(int(expires_at), timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") if expires_at else ""
+    except Exception:
+        expired = str(expires_at or "")
+    headers = account.get("headers") if isinstance(account.get("headers"), dict) else {
+        "X-XAI-Token-Auth": "xai-grok-cli",
+        "x-grok-client-version": "0.2.93",
+        "x-grok-client-identifier": "grok-shell",
+    }
+    result = {
+        "type": "xai",
+        "auth_kind": "oauth",
+        "email": email,
+        "sub": subject,
+        "access_token": str(account.get("access_token") or "").strip(),
+        "refresh_token": str(account.get("refresh_token") or "").strip(),
+        "id_token": str(account.get("id_token") or "").strip(),
+        "token_type": str(account.get("token_type") or "Bearer").strip(),
+        "expires_in": account.get("token_expires_in"),
+        "expired": expired,
+        "last_refresh": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "token_endpoint": str(account.get("token_endpoint") or "https://auth.x.ai/oauth2/token").strip(),
+        "base_url": str(account.get("base_url") or "https://cli-chat-proxy.grok.com/v1").strip(),
+        "disabled": bool(account.get("cpa_disabled", False)),
+        "headers": headers,
+    }
+    return {key: value for key, value in result.items() if value not in (None, "")}
+
+
 def _select_accounts(selectors: list[str] | None = None) -> list[dict[str, Any]]:
     selected = [str(item or "").strip() for item in selectors or [] if str(item or "").strip()]
     accounts = list_registered_accounts(include_secret=True)
@@ -595,7 +632,28 @@ def _cpa_filename(account: dict[str, Any]) -> str:
     scope = str(account.get("chatgpt_account_id") or account.get("workspace_id") or "").strip()
     suffix = f"-{scope[:10]}" if scope else ""
     safe = "".join(char if char.isalnum() or char in {"@", ".", "_", "-"} else "_" for char in email)
-    return f"{safe}{suffix}.json"
+    prefix = "xai-" if str(account.get("platform") or "").strip().lower() == "grok" else ""
+    return f"{prefix}{safe}{suffix}.json"
+
+
+def export_account_dicts_to_cpa(accounts: list[dict[str, Any]] | dict[str, Any]) -> dict[str, Any]:
+    selected = [accounts] if isinstance(accounts, dict) else [item for item in accounts if isinstance(item, dict)]
+    files = []
+    for account in selected:
+        document = build_cpa_auth_file(account)
+        if not document.get("access_token"):
+            continue
+        files.append({
+            "filename": _cpa_filename(account),
+            "data": document,
+        })
+    return {
+        "type": "cpa-auth-files",
+        "version": 1,
+        "exported_at": _now(),
+        "count": len(files),
+        "files": files,
+    }
 
 
 def _upload_cpa_account(account: dict[str, Any], cfg: dict[str, Any], *, index: int = 1, total_threads: int = 1) -> dict[str, Any]:

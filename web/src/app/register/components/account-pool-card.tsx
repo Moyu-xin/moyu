@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
-import { Activity, ArrowDown, ArrowUp, ArrowUpDown, Clock3, Copy, Download, KeyRound, LoaderCircle, RefreshCw, Send, ShieldAlert, Trash2, Upload, X, Zap } from "lucide-react";
+import { Activity, ArrowDown, ArrowUp, ArrowUpDown, Clock3, Copy, Download, KeyRound, LoaderCircle, RefreshCw, Send, ShieldAlert, Square, Trash2, Upload, X, Zap } from "lucide-react";
 import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -9,18 +9,19 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import {
-  checkAccountHealth,
   acquireAccountOAuthAutomatically,
   checkAccountQuota,
   clearAccountPool,
   completeAccountOAuth,
   deleteAccount,
   exportAccountsToSub2ApiData,
+  fetchAccountBatches,
   fetchAccountHealth,
   fetchAccountPool,
   importAccounts,
   importAccountsToCpa,
   importAccountsToSub2Api,
+  outboundAccounts,
   pruneBannedAccounts,
   refreshAccountTypes,
   startAccountOAuth,
@@ -35,6 +36,7 @@ import {
   type AccountItem,
   type AccountOAuthSession,
   type AccountPool,
+  type InventoryBatch,
 } from "@/lib/api";
 import { AccountOAuthDialog } from "./account-oauth-dialog";
 
@@ -66,6 +68,7 @@ function quotaText(i?: AccountItem) {
   if (!i) return "未知";
   const status = String(i.quota_status || "").toLowerCase();
   if (status === "failed") return i.last_quota_error ? `失败：${healthText(i.quota_error_status || "quota_failed")}` : "同步失败";
+  if (status === "unavailable") return "不提供额度";
   const used = i.quota_used;
   const total = i.quota_total;
   const remaining = i.quota_remaining;
@@ -193,6 +196,23 @@ function saveJsonFile(name: string, data: unknown) {
 
 function accountSelector(account?: AccountItem) {
   return String(account?.inventory_id || account?.inventory_key || account?.email || "");
+}
+
+function accountPlatform(account?: AccountItem): "openai" | "grok" {
+  return String(account?.platform || "openai").trim().toLowerCase() === "grok" ? "grok" : "openai";
+}
+
+function platformText(account?: AccountItem) {
+  return accountPlatform(account) === "grok" ? "Grok" : "ChatGPT";
+}
+
+function canReauthorizeGrok(account?: AccountItem) {
+  return Boolean(
+    account
+    && accountPlatform(account) === "grok"
+    && account.sub2api_account_id
+    && (account.sso_token || account.has_sso_token),
+  );
 }
 
 type AccountSortKey = "email" | "plan" | "created_at" | "expires_at" | "sub2api";
@@ -327,6 +347,7 @@ export function AccountPoolCard({ active = true }: { active?: boolean }) {
   const [statusFilter, setStatusFilter] = useState("all");
   const [healthFilter, setHealthFilter] = useState("all");
   const [typeFilter, setTypeFilter] = useState("all");
+  const [platformFilter, setPlatformFilter] = useState<"all" | "openai" | "grok">("all");
   const [groupFilter, setGroupFilter] = useState("all");
   const [readinessFilter, setReadinessFilter] = useState("all");
   const [sortKey, setSortKey] = useState<AccountSortKey>("created_at");
@@ -339,15 +360,49 @@ export function AccountPoolCard({ active = true }: { active?: boolean }) {
   const [healthMethod, setHealthMethod] = useState("auto");
   const [healthConcurrency, setHealthConcurrency] = useState(10);
   const [oauthSession, setOauthSession] = useState<AccountOAuthSession | null>(null);
+  const [batches, setBatches] = useState<InventoryBatch[]>([]);
+  const [outboundBatch, setOutboundBatch] = useState("");
+  const [outboundQuantity, setOutboundQuantity] = useState(10);
+  const [outboundFormat, setOutboundFormat] = useState<"sub2api" | "cpa" | "json">("sub2api");
 
   const selected = useMemo<AccountItem | undefined>(() => pool?.accounts.find((i) => accountSelector(i) === selectedAccountId), [pool, selectedAccountId]);
+  const selectedCanReauthorizeGrok = canReauthorizeGrok(selected);
+  const selectedCanRefreshToken = Boolean(
+    selected
+    && (
+      selected.refresh_token
+      || selected.has_refresh_token
+      || (accountPlatform(selected) === "grok" && (selected.sso_token || selected.has_sso_token))
+    ),
+  );
   const stats = pool?.stats || {};
   const logs = useMemo(() => [...(inventory?.logs || [])].reverse(), [inventory]);
+  const taskRunning = Boolean(inventory?.enabled || inventory?.job_running);
   const selectedSet = useMemo(() => new Set(selectedAccountIds), [selectedAccountIds]);
   const selectedSelectors = useMemo(() => Array.from(new Set(selectedAccountIds.filter(Boolean))), [selectedAccountIds]);
   const groupOptions = useMemo(() => Array.from(new Set(["默认", ...(pool?.accounts || []).map(mailboxGroupLabel)]))
     .filter(Boolean)
     .sort((a, b) => a.localeCompare(b, "zh-Hans-CN")), [pool]);
+  const platformCounts = useMemo(() => {
+    const accounts = pool?.accounts || [];
+    const aggregate = stats.by_platform && typeof stats.by_platform === "object"
+      ? stats.by_platform as Record<string, unknown>
+      : {};
+    const aggregateOpenai = Number(aggregate.openai || 0);
+    const aggregateGrok = Number(aggregate.grok || 0);
+    if (pool?.page_info?.partial && aggregateOpenai + aggregateGrok > 0) {
+      return {
+        all: Number(stats.total || aggregateOpenai + aggregateGrok),
+        openai: aggregateOpenai,
+        grok: aggregateGrok,
+      };
+    }
+    return {
+      all: accounts.length,
+      openai: accounts.filter((account) => accountPlatform(account) === "openai").length,
+      grok: accounts.filter((account) => accountPlatform(account) === "grok").length,
+    };
+  }, [pool, stats]);
 
   const appendUiLog = (text: string, level = "info") => {
     const entry = { time: new Date().toISOString(), text, level };
@@ -387,11 +442,12 @@ export function AccountPoolCard({ active = true }: { active?: boolean }) {
       const status = String(i.status || "active").toLowerCase();
       const group = mailboxGroupLabel(i);
       return (statusFilter === "all" || status === statusFilter)
+        && (platformFilter === "all" || accountPlatform(i) === platformFilter)
         && healthFilterMatches(healthFilter, health, rtStatus)
         && readinessMatches(readinessFilter, i)
         && (typeFilter === "all" || type === typeFilter || (typeFilter === "team" && ["team", "business", "enterprise"].includes(type)))
         && (groupFilter === "all" || group === groupFilter)
-        && (!q || `${i.email} ${group} ${i.note || ""} ${i.plan_type || ""} ${i.account_type || ""} ${i.health_status || ""} ${i.health_error || ""} ${i.oauth_status || ""} ${i.oauth_refresh_status || ""} ${i.oauth_refresh_error || ""} ${i.oauth_token_status || ""} ${i.refresh_token_kind || ""} ${i.refresh_token_label || ""} ${i.warehouse_status || ""} ${i.quota_error_status || ""} ${i.last_quota_error || ""} ${i.sub2api_account_id || ""} ${i.chatgpt_account_id || ""} ${i.workspace_id || ""} ${i.inventory_id || ""}`.toLowerCase().includes(q));
+        && (!q || `${i.email} ${group} ${i.platform || "openai"} ${platformText(i)} ${i.note || ""} ${i.plan_type || ""} ${i.account_type || ""} ${i.health_status || ""} ${i.health_error || ""} ${i.oauth_status || ""} ${i.oauth_refresh_status || ""} ${i.oauth_refresh_error || ""} ${i.oauth_token_status || ""} ${i.refresh_token_kind || ""} ${i.refresh_token_label || ""} ${i.warehouse_status || ""} ${i.quota_error_status || ""} ${i.last_quota_error || ""} ${i.sub2api_account_id || ""} ${i.chatgpt_account_id || ""} ${i.workspace_id || ""} ${i.inventory_id || ""}`.toLowerCase().includes(q));
     });
     accounts.sort((a, b) => {
       const left = accountSortValue(a, sortKey);
@@ -402,12 +458,20 @@ export function AccountPoolCard({ active = true }: { active?: boolean }) {
       return sortDirection === "asc" ? compared : -compared;
     });
     return accounts;
-  }, [pool, query, statusFilter, healthFilter, readinessFilter, typeFilter, groupFilter, sortKey, sortDirection]);
+  }, [pool, query, statusFilter, healthFilter, readinessFilter, typeFilter, platformFilter, groupFilter, sortKey, sortDirection]);
   const filteredSelectors = useMemo(() => Array.from(new Set(filtered.map(accountSelector).filter(Boolean))), [filtered]);
   const filteredOAuthSelectors = useMemo(() => Array.from(new Set(filtered.filter((account) => account.oauth_capable).map(accountSelector).filter(Boolean))), [filtered]);
   const selectedOAuthSelectors = useMemo(() => {
     const selectedIds = new Set(selectedSelectors);
     return (pool?.accounts || []).filter((account) => account.oauth_capable && selectedIds.has(accountSelector(account))).map(accountSelector).filter(Boolean);
+  }, [pool, selectedSelectors]);
+  const filteredGrokReimportSelectors = useMemo(
+    () => Array.from(new Set(filtered.filter(canReauthorizeGrok).map(accountSelector).filter(Boolean))),
+    [filtered],
+  );
+  const selectedGrokReimportSelectors = useMemo(() => {
+    const selectedIds = new Set(selectedSelectors);
+    return (pool?.accounts || []).filter((account) => canReauthorizeGrok(account) && selectedIds.has(accountSelector(account))).map(accountSelector).filter(Boolean);
   }, [pool, selectedSelectors]);
 
   const effectivePageSize = pageSize <= 0 ? Math.max(filtered.length, 1) : pageSize;
@@ -464,18 +528,15 @@ export function AccountPoolCard({ active = true }: { active?: boolean }) {
     if (!silent) setLoading(true);
     try {
       if (includeAccounts) {
-        const [poolData, invData] = await Promise.all([fetchAccountPool({ force: silent, preview }), fetchAccountHealth().catch(() => null)]);
+        const [poolData, invData, batchData] = await Promise.all([
+          fetchAccountPool({ force: silent, preview }),
+          fetchAccountHealth().catch(() => null),
+          fetchAccountBatches().catch(() => ({ batches: [] as InventoryBatch[] })),
+        ]);
         setPool(poolData.account_pool);
+        setBatches(batchData.batches);
         setSelectedAccountId((current) => current && !poolData.account_pool.accounts.some((item) => accountSelector(item) === current) ? "" : current);
         applyInventory(invData?.inventory);
-        if (preview && poolData.account_pool.page_info?.partial) {
-          window.setTimeout(() => {
-            void fetchAccountPool({ force: true }).then((fullData) => {
-              setPool(fullData.account_pool);
-              setSelectedAccountId((current) => current && !fullData.account_pool.accounts.some((item) => accountSelector(item) === current) ? "" : current);
-            }).catch(() => undefined);
-          }, 600);
-        }
       } else {
         const invData = await fetchAccountHealth();
         applyInventory(invData.inventory);
@@ -495,6 +556,12 @@ export function AccountPoolCard({ active = true }: { active?: boolean }) {
     const timer = window.setInterval(() => void load(true, false), 6000);
     return () => window.clearInterval(timer);
   }, [active]);
+
+  const previousTaskRunningRef = useRef(false);
+  useEffect(() => {
+    if (previousTaskRunningRef.current && !taskRunning) void load(true, true);
+    previousTaskRunningRef.current = taskRunning;
+  }, [taskRunning]);
 
   const doImportContent = async (text: string, label = "导入", source: "text" | "file" = "text") => {
     if (!text.trim()) return toast.error("请选择文件或粘贴账号内容");
@@ -535,15 +602,13 @@ export function AccountPoolCard({ active = true }: { active?: boolean }) {
     setBusyAction(quota ? "check" : "health");
     appendUiLog(`${quota ? "测活+额度" : "账号测活"}已提交，目标=${emails.length ? emails.length : "全部"}`);
     try {
-      const data = await checkAccountHealth({ emails, method: healthMethod, refresh_quota: quota, concurrency: healthConcurrency });
-      setPool(data.account_pool);
-      if (data.inventory) setInventory(data.inventory);
-      if (data.inventory_health?.busy) {
-        toast.warning(String(data.inventory_health.message || "已有账号库存任务正在运行"));
+      const data = await startAccountHealth({ emails, method: healthMethod, refresh_quota: quota, concurrency: healthConcurrency });
+      setInventory(data.inventory);
+      if (data.inventory?.busy) {
+        toast.warning(String(data.inventory.message || "已有账号库存任务正在运行"));
         return;
       }
-      toast.success(quota ? "测活+额度完成" : "测活完成");
-      await load(true);
+      toast.success(quota ? "测活+额度已启动，可随时停止" : "测活已启动，可随时停止");
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "测活失败");
     } finally {
@@ -617,9 +682,16 @@ export function AccountPoolCard({ active = true }: { active?: boolean }) {
   };
 
   const doStopBackground = async () => {
-    const data = await stopAccountHealth();
-    setInventory(data.inventory);
-    toast.success("已停止");
+    setBusyAction("stop-health");
+    try {
+      const data = await stopAccountHealth();
+      setInventory(data.inventory);
+      toast.success("已请求停止，不再派发剩余账号");
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "停止失败");
+    } finally {
+      setBusyAction("");
+    }
   };
 
   const toggleSchedule = async () => {
@@ -653,25 +725,27 @@ export function AccountPoolCard({ active = true }: { active?: boolean }) {
     }
   };
 
-  const doSub2ApiImport = async (emails: string[]) => {
-    setBusyAction("sub2api-import");
-    appendUiLog(`sub2api 导入已提交，目标=${emails.length ? emails.length : "全部"}`);
+  const doSub2ApiImport = async (emails: string[], reauthorizeGrok = false) => {
+    if (reauthorizeGrok && !window.confirm(`将为 ${emails.length} 个 Grok 账号通过本地 xAI SSO 重新获取 OAuth，并覆盖原 sub2api 账号凭据。是否继续？`)) return;
+    setBusyAction(reauthorizeGrok ? "sub2api-reauthorize" : "sub2api-import");
+    const actionLabel = reauthorizeGrok ? "Grok 重新授权并覆盖 sub2api" : "sub2api 导入";
+    appendUiLog(`${actionLabel}已提交，目标=${emails.length ? emails.length : "全部"}`);
     try {
-      const data = await importAccountsToSub2Api(emails);
+      const data = await importAccountsToSub2Api(emails, { reauthorize_grok: reauthorizeGrok });
       setPool(data.account_pool);
       const result = data.sub2api;
       const failed = (result.results || []).filter((item) => !item.ok);
-      failed.slice(0, 20).forEach((item) => appendUiLog(`sub2api 导入失败：${item.email || item.name || "未知账号"}，${importFailureText(item.error, item.response, item.status_code)}`));
+      failed.slice(0, 20).forEach((item) => appendUiLog(`${actionLabel}失败：${item.email || item.name || "未知账号"}，${importFailureText(item.error, item.response, item.status_code)}`));
       if (result.ok) {
-        toast.success(`sub2api 导入完成：成功 ${result.success}/${result.total}`);
+        toast.success(`${actionLabel}完成：成功 ${result.success}/${result.total}`);
       } else if (result.partial) {
-        toast.warning(`sub2api 部分成功：成功 ${result.success}，失败 ${result.fail}`);
+        toast.warning(`${actionLabel}部分成功：成功 ${result.success}，失败 ${result.fail}`);
       } else {
-        toast.error(`sub2api 全部失败：${result.fail}/${result.total}`);
+        toast.error(`${actionLabel}全部失败：${result.fail}/${result.total}`);
       }
       await load(true);
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : "sub2api 导入失败");
+      toast.error(e instanceof Error ? e.message : `${actionLabel}失败`);
     } finally {
       setBusyAction("");
     }
@@ -725,6 +799,25 @@ export function AccountPoolCard({ active = true }: { active?: boolean }) {
       await load(true);
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "RT 刷新失败：需要重新登录或重新导入有效 OAuth");
+    } finally {
+      setBusyAction("");
+    }
+  };
+
+  const doOutbound = async () => {
+    setBusyAction("outbound");
+    try {
+      const data = await outboundAccounts({
+        quantity: Math.max(0, outboundQuantity),
+        registration_batch_id: outboundBatch,
+        format: outboundFormat,
+      });
+      setBatches(data.batches);
+      saveJsonFile(data.account_outbound.filename || `accounts-${Date.now()}.json`, data.account_outbound.data);
+      toast.success(`已出库 ${data.account_outbound.count} 个账号${data.account_outbound.skipped ? `，跳过 ${data.account_outbound.skipped} 个无 AT 账号` : ""}`);
+      await load(true, true);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "账号出库失败");
     } finally {
       setBusyAction("");
     }
@@ -832,7 +925,7 @@ export function AccountPoolCard({ active = true }: { active?: boolean }) {
               <CardDescription className="text-slate-500">成品账号需具备可用 OAuth Token，或已在 sub2api 中通过测活；未达标记录保留为待认证状态。</CardDescription>
             </div>
             <Button variant="outline" className="h-9 rounded-xl cursor-pointer hover:bg-slate-50" onClick={() => void load()} disabled={loading || saving}>
-              <RefreshCw className="size-4" />刷新
+              <RefreshCw className="size-4" />{pool?.page_info?.partial ? `加载全部（共 ${pool.page_info.total}）` : "刷新"}
             </Button>
           </div>
           <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-6">
@@ -861,7 +954,7 @@ export function AccountPoolCard({ active = true }: { active?: boolean }) {
                   <select value={healthMethod} onChange={(e) => setHealthMethod(e.target.value)} className="h-9 rounded-xl border border-slate-200 bg-white px-3 text-sm">
                     <option value="auto">自动测活</option>
                     <option value="sub2api">sub2api 测活</option>
-                    <option value="local">本地 Token 测活/额度</option>
+                    <option value="local">本地 Token/SSO 测活</option>
                   </select>
                   <label className="inline-flex h-9 items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 text-sm text-slate-700">
                     <span>并发</span>
@@ -886,14 +979,41 @@ export function AccountPoolCard({ active = true }: { active?: boolean }) {
                 </div>
               </div>
 
+              <div className="grid gap-3 border-y border-slate-200 bg-white py-3 md:grid-cols-[minmax(220px,1fr)_120px_150px_auto]">
+                <label className="space-y-1">
+                  <span className="text-xs font-semibold text-slate-600">注册批次</span>
+                  <select value={outboundBatch} onChange={(event) => setOutboundBatch(event.target.value)} className="h-9 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm">
+                    <option value="">全部未出库账号</option>
+                    {batches.map((batch) => <option key={batch.id} value={batch.id}>{batch.label || batch.id} · 可出 {batch.available}/{batch.total}</option>)}
+                  </select>
+                </label>
+                <label className="space-y-1">
+                  <span className="text-xs font-semibold text-slate-600">出库数量</span>
+                  <Input type="number" min={0} value={outboundQuantity} onChange={(event) => setOutboundQuantity(Math.max(0, Number(event.target.value) || 0))} className="h-9" />
+                </label>
+                <label className="space-y-1">
+                  <span className="text-xs font-semibold text-slate-600">导出格式</span>
+                  <select value={outboundFormat} onChange={(event) => setOutboundFormat(event.target.value as "sub2api" | "cpa" | "json")} className="h-9 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm">
+                    <option value="sub2api">Sub2API</option>
+                    <option value="cpa">CPA auth files</option>
+                    <option value="json">完整 JSON</option>
+                  </select>
+                </label>
+                <div className="flex items-end">
+                  <Button className="h-9 bg-slate-900 text-white hover:bg-slate-800" onClick={() => void doOutbound()} disabled={saving}>
+                    {busyAction === "outbound" ? <LoaderCircle className="size-4 animate-spin" /> : <Download className="size-4" />}账号出库
+                  </Button>
+                </div>
+              </div>
+
               <div className="flex flex-wrap gap-2 rounded-xl border border-emerald-200 bg-emerald-50 p-3">
                 {selectedSelectors.length ? (
-                  <Button className="h-9 rounded-xl bg-emerald-700 text-white" onClick={() => void doCheck(selectedSelectors, true)} disabled={saving}><Activity className="size-4" />测选中+额度（{selectedSelectors.length}）</Button>
+                  <Button className="h-9 rounded-xl bg-emerald-700 text-white" onClick={() => void doCheck(selectedSelectors, true)} disabled={saving || taskRunning}><Activity className="size-4" />测选中+额度（{selectedSelectors.length}）</Button>
                 ) : null}
-                <Button className="h-9 rounded-xl bg-emerald-600 text-white" onClick={() => void doCheck(filteredSelectors, true)} disabled={saving || !filteredSelectors.length}>{busyAction === "check" ? <LoaderCircle className="size-4 animate-spin" /> : <Activity className="size-4" />}测当前筛选+额度（{filteredSelectors.length}）</Button>
-                <Button variant="outline" className="h-9 rounded-xl bg-white cursor-pointer hover:bg-slate-50" onClick={() => void doCheck([], true)} disabled={saving || !pool?.accounts.length}>全部测活+额度</Button>
-                <Button variant="outline" className="h-9 rounded-xl bg-white cursor-pointer hover:bg-slate-50" onClick={() => void doStartBackground()} disabled={saving || inventory?.enabled || !pool?.accounts.length}>{busyAction === "background" ? <LoaderCircle className="size-4 animate-spin" /> : <Zap className="size-4" />}后台测活</Button>
-                <Button variant="outline" className="h-9 rounded-xl bg-white cursor-pointer hover:bg-slate-50" onClick={() => void doStopBackground()} disabled={!inventory?.enabled}>停止</Button>
+                <Button className="h-9 rounded-xl bg-emerald-600 text-white" onClick={() => void doCheck(filteredSelectors, true)} disabled={saving || taskRunning || !filteredSelectors.length}>{busyAction === "check" ? <LoaderCircle className="size-4 animate-spin" /> : <Activity className="size-4" />}测当前筛选+额度（{filteredSelectors.length}）</Button>
+                <Button variant="outline" className="h-9 rounded-xl bg-white cursor-pointer hover:bg-slate-50" onClick={() => void doCheck([], true)} disabled={saving || taskRunning || !pool?.accounts.length}>全部测活+额度</Button>
+                <Button variant="outline" className="h-9 rounded-xl bg-white cursor-pointer hover:bg-slate-50" onClick={() => void doStartBackground()} disabled={saving || taskRunning || !pool?.accounts.length}>{busyAction === "background" ? <LoaderCircle className="size-4 animate-spin" /> : <Zap className="size-4" />}后台测活</Button>
+                <Button variant="outline" className="h-9 rounded-xl border-rose-200 bg-white text-rose-700 cursor-pointer hover:bg-rose-50" onClick={() => void doStopBackground()} disabled={saving || !inventory?.enabled}>{busyAction === "stop-health" ? <LoaderCircle className="size-4 animate-spin" /> : <Square className="size-4" />}停止测活</Button>
                 <Button variant="outline" className="h-9 rounded-xl bg-white cursor-pointer hover:bg-slate-50" onClick={() => void toggleSchedule()} disabled={saving}><Clock3 className="size-4" />{inventory?.settings.scheduled_enabled ? "关闭定时" : "开启定时"}</Button>
                 {selectedSelectors.length ? (
                   <Button variant="outline" className="h-9 rounded-xl bg-white cursor-pointer hover:bg-slate-50" onClick={() => void doQuota(selectedSelectors)} disabled={saving}>同步选中额度（{selectedSelectors.length}）</Button>
@@ -914,10 +1034,14 @@ export function AccountPoolCard({ active = true }: { active?: boolean }) {
                 ) : null}
                 <Button className="h-9 rounded-xl bg-sky-600 text-white cursor-pointer hover:bg-sky-700" onClick={() => void doSub2ApiImport(filteredOAuthSelectors)} disabled={saving || !filteredOAuthSelectors.length}><Send className="size-4" />导入筛选 OAuth（{filteredOAuthSelectors.length}）</Button>
                 <Button variant="outline" className="h-9 rounded-xl bg-white cursor-pointer hover:bg-slate-50" onClick={() => void doSub2ApiImport([])} disabled={saving || !n(stats.oauth_capable)}>导入全部 OAuth</Button>
+                {selectedGrokReimportSelectors.length ? (
+                  <Button className="h-9 rounded-xl bg-indigo-700 text-white cursor-pointer hover:bg-indigo-800" onClick={() => void doSub2ApiImport(selectedGrokReimportSelectors, true)} disabled={saving}><RefreshCw className="size-4" />重新授权选中 Grok（{selectedGrokReimportSelectors.length}）</Button>
+                ) : null}
+                <Button variant="outline" className="h-9 rounded-xl border-indigo-200 bg-white text-indigo-700 cursor-pointer hover:bg-indigo-50" onClick={() => void doSub2ApiImport(filteredGrokReimportSelectors, true)} disabled={saving || !filteredGrokReimportSelectors.length}><RefreshCw className="size-4" />覆盖重导入 Grok（{filteredGrokReimportSelectors.length}）</Button>
                 {selectedOAuthSelectors.length ? (
                   <Button variant="outline" className="h-9 rounded-xl bg-white cursor-pointer hover:bg-slate-50" onClick={() => void doExportSub2Api(selectedOAuthSelectors)} disabled={saving}>导出选中 OAuth JSON</Button>
                 ) : null}
-                <Button variant="outline" className="h-9 rounded-xl bg-white cursor-pointer hover:bg-slate-50" onClick={() => void doSub2ApiImport(selected ? [accountSelector(selected)] : [])} disabled={saving || !selected?.oauth_capable}>导入当前 OAuth 账号</Button>
+                <Button variant="outline" className="h-9 rounded-xl bg-white cursor-pointer hover:bg-slate-50" onClick={() => void doSub2ApiImport(selected ? [accountSelector(selected)] : [], selectedCanReauthorizeGrok)} disabled={saving || (!selected?.oauth_capable && !selectedCanReauthorizeGrok)}>{selectedCanReauthorizeGrok ? "覆盖重导入当前 Grok" : "导入当前 OAuth 账号"}</Button>
                 <Button variant="outline" className="h-9 rounded-xl bg-white cursor-pointer hover:bg-slate-50" onClick={() => void doExportSub2Api([])} disabled={saving || !n(stats.oauth_capable)}><Download className="size-4" />导出全部 OAuth JSON</Button>
                 <Button variant="outline" className="h-9 rounded-xl bg-white cursor-pointer hover:bg-slate-50" onClick={() => void doExportSub2Api(selected ? [accountSelector(selected)] : [])} disabled={saving || !selected?.oauth_capable}>导出当前 OAuth 账号</Button>
               </div>
@@ -938,7 +1062,7 @@ export function AccountPoolCard({ active = true }: { active?: boolean }) {
                   <div className="text-sm font-semibold">测活 / 额度执行日志</div>
                   <div className="text-xs text-slate-400 font-medium">测活、额度同步、后台/定时任务都会写入这里</div>
                 </div>
-                <Badge variant={inventory?.enabled ? "success" : "secondary"} className="rounded-md">{inventory?.enabled ? "运行中" : "空闲"}</Badge>
+                <Badge variant={inventory?.enabled ? "success" : inventory?.job_running ? "warning" : "secondary"} className="rounded-md">{inventory?.enabled ? "运行中" : inventory?.job_running ? "停止中" : "空闲"}</Badge>
               </div>
               <div className="max-h-80 space-y-1 overflow-auto rounded-lg border border-white/10 bg-black/20 p-2 font-mono text-xs">
                 {!logs.length ? <div className="py-8 text-center text-slate-400">暂无执行日志</div> : logs.map((log, index) => (
@@ -951,6 +1075,28 @@ export function AccountPoolCard({ active = true }: { active?: boolean }) {
           </div>
 
           <div className="space-y-2 rounded-xl border border-slate-200 bg-white p-3">
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 pb-3">
+              <div>
+                <div className="text-xs font-semibold text-slate-700">账号平台</div>
+                <div className="mt-0.5 text-[11px] text-slate-500">库存按 ChatGPT 与 Grok 独立识别，同邮箱不会混为同一账号。</div>
+              </div>
+              <div className="inline-flex overflow-hidden rounded-lg border border-slate-200 bg-slate-50 p-0.5">
+                {([
+                  ["all", "全部", platformCounts.all],
+                  ["openai", "ChatGPT", platformCounts.openai],
+                  ["grok", "Grok", platformCounts.grok],
+                ] as const).map(([value, label, count]) => (
+                  <button
+                    key={value}
+                    type="button"
+                    onClick={() => { setPlatformFilter(value); setPage(1); }}
+                    className={`h-8 px-3 text-xs font-semibold transition ${platformFilter === value ? "bg-slate-900 text-white shadow-sm" : "text-slate-600 hover:bg-white hover:text-slate-900"}`}
+                  >
+                    {label} {count}
+                  </button>
+                ))}
+              </div>
+            </div>
             <div className="grid gap-2 lg:grid-cols-4 xl:grid-cols-[minmax(240px,1fr)_130px_135px_150px_120px_120px_100px]">
               <Input value={query} onChange={(e) => { setQuery(e.target.value); setPage(1); }} placeholder="搜索邮箱/RT 来源/OAuth/测活/sub2api ID" className="h-9 rounded-xl" />
               <select value={statusFilter} onChange={(e) => { setStatusFilter(e.target.value); setPage(1); }} className="h-9 rounded-xl border border-slate-200 bg-white px-3 text-sm">
@@ -1078,6 +1224,8 @@ export function AccountPoolCard({ active = true }: { active?: boolean }) {
                       const rowTone = isSelected ? "bg-emerald-50/90" : isBad ? "bg-rose-50/75" : "bg-white";
                       const rowHover = isBad ? "hover:bg-rose-100/70" : "hover:bg-emerald-50/70";
                       const plan = typeText(i);
+                      const grokReimport = canReauthorizeGrok(i);
+                      const canRefreshToken = Boolean(i.refresh_token || i.has_refresh_token || (accountPlatform(i) === "grok" && (i.sso_token || i.has_sso_token)));
                       const planClass = plan === "Plus"
                         ? "border-indigo-200 bg-indigo-50 text-indigo-700"
                         : plan === "Pro"
@@ -1112,6 +1260,7 @@ export function AccountPoolCard({ active = true }: { active?: boolean }) {
                             <div className="space-y-1.5">
                               <div className="truncate font-mono text-xs font-semibold text-slate-950" title={i.email}>{i.email}</div>
                               <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-slate-500">
+                                <Badge variant={accountPlatform(i) === "grok" ? "info" : "success"} className="rounded-md">{platformText(i)}</Badge>
                                 <Badge variant="secondary" className="rounded-md">{mailboxGroupLabel(i)}</Badge>
                                 <Badge variant={healthVariant(healthStatus)} className="rounded-md" title={i.health_error || i.last_quota_error || ""}>{healthText(healthStatus)}</Badge>
                                 <span className="rounded-md bg-slate-100 px-1.5 py-0.5 font-mono">{statusText(i.status)}</span>
@@ -1160,11 +1309,11 @@ export function AccountPoolCard({ active = true }: { active?: boolean }) {
                             <div className="flex flex-wrap gap-1.5">
                               <Button variant="outline" className="h-7 rounded-lg bg-white px-2 text-xs" onClick={() => setSelectedAccountId(selector)} disabled={saving}>查看</Button>
                               <Button variant="outline" className="h-7 rounded-lg bg-white px-2 text-xs" onClick={() => void copyText(i.access_token || "", "Access Token")} disabled={saving || !i.access_token}>复制 AT</Button>
-                              <Button variant="outline" className="h-7 rounded-lg border-blue-200 bg-white px-2 text-xs text-blue-700 hover:bg-blue-50" onClick={() => void doRefreshToken(selector)} disabled={saving || !(i.refresh_token || i.has_refresh_token)}>{busyAction === "refresh-token" ? <LoaderCircle className="size-3 animate-spin" /> : null}刷新 token</Button>
+                              <Button variant="outline" className="h-7 rounded-lg border-blue-200 bg-white px-2 text-xs text-blue-700 hover:bg-blue-50" onClick={() => void doRefreshToken(selector)} disabled={saving || !canRefreshToken}>{busyAction === "refresh-token" ? <LoaderCircle className="size-3 animate-spin" /> : null}{accountPlatform(i) === "grok" ? "重取 token" : "刷新 token"}</Button>
                               <Button className="h-7 bg-emerald-600 px-2 text-xs text-white hover:bg-emerald-700" onClick={() => void startOAuth(i)} disabled={saving} title={i.registration_proxy?.node_name || i.registration_proxy_node_id ? "使用注册时记录的节点立即执行自动 OAuth" : "打开人工 OAuth 授权页"}>{busyAction === "oauth-start" ? <LoaderCircle className="size-3 animate-spin" /> : <KeyRound className="size-3" />}{i.registration_proxy?.node_name || i.registration_proxy_node_id ? "同节点 OAuth" : "打开授权"}</Button>
-                              <Button variant="outline" className="h-7 rounded-lg bg-white px-2 text-xs" onClick={() => void doCheck([selector], false)} disabled={saving}>检测存活</Button>
+                              <Button variant="outline" className="h-7 rounded-lg bg-white px-2 text-xs" onClick={() => void doCheck([selector], false)} disabled={saving || taskRunning}>检测存活</Button>
                               <Button variant="outline" className="h-7 rounded-lg border-indigo-200 bg-white px-2 text-xs text-indigo-700 hover:bg-indigo-50" onClick={() => void doRefreshTypes([selector])} disabled={saving}>{busyAction === "type-refresh" ? <LoaderCircle className="size-3 animate-spin" /> : null}刷新类型</Button>
-                              <Button variant="outline" className="h-7 rounded-lg border-sky-200 bg-white px-2 text-xs text-sky-700 hover:bg-sky-50" onClick={() => void doSub2ApiImport([selector])} disabled={saving || !i.oauth_capable} title={i.oauth_capable ? "导入 sub2api" : "需要先获取 sub2api OAuth"}><Send className="size-3" />导入 sub2api</Button>
+                              <Button variant="outline" className="h-7 rounded-lg border-sky-200 bg-white px-2 text-xs text-sky-700 hover:bg-sky-50" onClick={() => void doSub2ApiImport([selector], grokReimport)} disabled={saving || (!i.oauth_capable && !grokReimport)} title={grokReimport ? "通过 xAI SSO 重新授权并覆盖原 sub2api 账号" : i.oauth_capable ? "导入 sub2api" : "需要先获取 sub2api OAuth"}>{grokReimport ? <RefreshCw className="size-3" /> : <Send className="size-3" />}{grokReimport ? "覆盖重导入" : "导入 sub2api"}</Button>
                               <Button variant="outline" className="h-7 rounded-lg border-amber-200 bg-white px-2 text-xs text-amber-700 hover:bg-amber-50" onClick={() => void doCpaImport([selector])} disabled={saving}><Send className="size-3" />导入 CPA</Button>
                               <Button variant="outline" className="h-7 rounded-lg border-rose-200 bg-rose-50 px-2 text-xs text-rose-700 hover:bg-rose-100" onClick={() => void doDelete(selector)} disabled={saving}><Trash2 className="size-3" />删除</Button>
                             </div>
@@ -1200,7 +1349,7 @@ export function AccountPoolCard({ active = true }: { active?: boolean }) {
             </div>
             <div className="max-h-[calc(88vh-76px)] space-y-4 overflow-auto p-5">
               <div className="flex flex-wrap gap-2">
-                <Button variant="outline" className="h-8 rounded-lg px-2.5 text-xs cursor-pointer hover:bg-slate-50" onClick={() => void doCheck([accountSelector(selected)], true)} disabled={saving}>测活+额度</Button>
+                <Button variant="outline" className="h-8 rounded-lg px-2.5 text-xs cursor-pointer hover:bg-slate-50" onClick={() => void doCheck([accountSelector(selected)], true)} disabled={saving || taskRunning}>测活+额度</Button>
                 <Button variant="outline" className="h-8 rounded-lg px-2.5 text-xs cursor-pointer hover:bg-slate-50" onClick={() => void doQuota([accountSelector(selected)])} disabled={saving}>仅额度</Button>
                 <Button variant="outline" className="h-8 rounded-lg px-2.5 text-xs cursor-pointer hover:bg-indigo-50 text-indigo-700 border-indigo-200" onClick={() => void doRefreshTypes([accountSelector(selected)])} disabled={saving}>{busyAction === "type-refresh" ? <LoaderCircle className="size-3.5 animate-spin" /> : <RefreshCw className="size-3.5" />}刷新类型</Button>
                 <Button variant="outline" className="h-8 rounded-lg px-2.5 text-xs cursor-pointer hover:bg-emerald-50 text-emerald-700 border-emerald-200" onClick={async () => {
@@ -1210,9 +1359,9 @@ export function AccountPoolCard({ active = true }: { active?: boolean }) {
                     await load(true);
                   } catch { toast.error("更新失败"); }
                 }} disabled={saving}>标记为 Plus</Button>
-                <Button variant="outline" className="h-8 rounded-lg px-2.5 text-xs cursor-pointer hover:bg-blue-50 text-blue-700 border-blue-200" onClick={() => void doRefreshToken(accountSelector(selected))} disabled={saving || !(selected.refresh_token || selected.has_refresh_token)}>RT刷新Token</Button>
+                <Button variant="outline" className="h-8 rounded-lg px-2.5 text-xs cursor-pointer hover:bg-blue-50 text-blue-700 border-blue-200" onClick={() => void doRefreshToken(accountSelector(selected))} disabled={saving || !selectedCanRefreshToken}>{accountPlatform(selected) === "grok" ? "重取 token" : "RT刷新Token"}</Button>
                 <Button className="h-8 bg-emerald-600 px-2.5 text-xs text-white hover:bg-emerald-700" onClick={() => void startOAuth(selected)} disabled={saving}><KeyRound className="size-3.5" />获取 OAuth 并导入</Button>
-                <Button variant="outline" className="h-8 rounded-lg px-2.5 text-xs cursor-pointer hover:bg-slate-50" onClick={() => void doSub2ApiImport([accountSelector(selected)])} disabled={saving || !selected.oauth_capable}>导入 sub2api</Button>
+                <Button variant="outline" className="h-8 rounded-lg px-2.5 text-xs cursor-pointer hover:bg-slate-50" onClick={() => void doSub2ApiImport([accountSelector(selected)], selectedCanReauthorizeGrok)} disabled={saving || (!selected.oauth_capable && !selectedCanReauthorizeGrok)}>{selectedCanReauthorizeGrok ? <RefreshCw className="size-3.5" /> : null}{selectedCanReauthorizeGrok ? "覆盖重导入" : "导入 sub2api"}</Button>
                 <Button variant="outline" className="h-8 rounded-lg border-amber-200 px-2.5 text-xs text-amber-700 cursor-pointer hover:bg-amber-50" onClick={() => void doCpaImport([accountSelector(selected)])} disabled={saving}>导入 CPA</Button>
                 <Button variant="outline" className="h-8 rounded-lg px-2.5 text-xs cursor-pointer hover:bg-slate-50" onClick={() => void doExportSub2Api([accountSelector(selected)])} disabled={saving}>导出 JSON</Button>
                 <Button variant="outline" className="h-8 rounded-lg border-rose-200 bg-rose-50 px-2.5 text-xs text-rose-700 cursor-pointer hover:bg-rose-100/50" onClick={() => void doDelete(accountSelector(selected))} disabled={saving}><Trash2 className="size-3.5" />删除</Button>

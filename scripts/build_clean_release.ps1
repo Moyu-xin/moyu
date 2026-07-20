@@ -54,7 +54,7 @@ $sourceTrees = @(
     @{ Path = ".github"; Extensions = @() },
     @{ Path = "api"; Extensions = @(".py") },
     @{ Path = "scripts"; Extensions = @(".py", ".ps1", ".sh") },
-    @{ Path = "services"; Extensions = @(".py", ".html", ".css", ".js") },
+    @{ Path = "services"; Extensions = @(".py", ".html", ".css", ".js", ".json", ".txt", ".mjs", ".md", ".example", ".gitignore", "") },
     @{ Path = "tests"; Extensions = @(".py") },
     @{ Path = "utils"; Extensions = @(".py", ".cjs") },
     @{ Path = "web\src"; Extensions = @() },
@@ -67,10 +67,13 @@ foreach ($tree in $sourceTrees) {
         throw "Required release directory is missing: $($tree.Path)"
     }
     foreach ($file in Get-ChildItem -LiteralPath $treeRoot -Recurse -File) {
+        $relative = $file.FullName.Substring($sourceRoot.Length).TrimStart("\", "/")
+        if ($relative -match '(^|[\\/])\.runtime([\\/]|$)' -or $relative -match '(^|[\\/])__pycache__([\\/]|$)') {
+            continue
+        }
         if ($tree.Extensions.Count -and $tree.Extensions -notcontains $file.Extension.ToLowerInvariant()) {
             continue
         }
-        $relative = $file.FullName.Substring($sourceRoot.Length).TrimStart("\", "/")
         Copy-ReleaseFile $relative
     }
 }

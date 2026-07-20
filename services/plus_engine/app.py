@@ -24,6 +24,17 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
 from services.atomic_json_store import read_json, write_json
+from services.account_token_profile import jwt_payload
+from services import proxy_pool_store
+from services.paypal_country_catalog import (
+    SMSBOWER_PAYPAL_COUNTRY_CODES,
+    SMSBOWER_PAYPAL_COUNTRY_META,
+)
+
+try:
+    from utils.sentinel import build_sentinel_headers as build_sentinel_headers_bundle
+except Exception:  # pragma: no cover - standalone fallback
+    build_sentinel_headers_bundle = None  # type: ignore
 
 try:
     from curl_cffi.requests import Session as CurlCffiSession  # type: ignore
@@ -53,8 +64,8 @@ PROXY_EXIT_RETRY_DELAY_SECONDS = 5
 APPROVE_NETWORK_RETRY_ATTEMPTS = 5
 MAX_ACTIVE_RUN_JOBS = 3
 MAX_BATCH_RESULT_BYTES = 2_000_000
-EXPECTED_MATRIX_TOTAL = 24
-EXPECTED_BILLING_COUNTRY_COUNT = 8
+EXPECTED_MATRIX_TOTAL = 108
+EXPECTED_BILLING_COUNTRY_COUNT = 27
 BASE_DIR = Path(__file__).resolve().parent
 PUBLIC_DIR = BASE_DIR / "public"
 DATA_DIR = Path(os.getenv("OPENAI_PAY_DATA_DIR", BASE_DIR / "data"))
@@ -68,17 +79,29 @@ RUN_JOB_MAX_ITEMS = 80
 RUN_JOB_MAX_EVENTS = 500
 LOCAL_RUN_KEY = os.getenv("OPENAI_PAY_LOCAL_RUN_KEY", "").strip() or secrets.token_urlsafe(24)
 APPROVE_BURST_SEMAPHORE = threading.BoundedSemaphore(APPROVE_BLOCKED_BURST_ATTEMPTS)
+APPROVE_PLAYWRIGHT_SEMAPHORE = threading.BoundedSemaphore(2)
 CANCEL_CONTEXT = threading.local()
 DEFAULT_PROXY = os.getenv(
     "OPENAI_PAY_DEFAULT_PROXY",
     "",
 ).strip()
 PROVIDER_STAGE_PROXY = os.getenv("OPENAI_PAY_PROVIDER_PROXY", "").strip()
+CHROME_IMPERSONATE = "chrome146"
+CHROME_MAJOR_VERSION = "146"
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36"
+    f"AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{CHROME_MAJOR_VERSION}.0.0.0 Safari/537.36"
 )
 DEFAULT_STRIPE_RUNTIME_VERSION = "6f8494a281"
+PAYPAL_AVAILABILITY_SUPPORTED = "supported"
+PAYPAL_AVAILABILITY_UNSUPPORTED = "unsupported"
+PAYPAL_AVAILABILITY_UNKNOWN = "unknown"
+PAYPAL_METHOD_LIST_KEYS = {
+    "payment_method_types",
+    "ordered_payment_method_types",
+    "visible_payment_method_types",
+}
+PAYPAL_UNAVAILABLE_MARKER = "paypal_unavailable_for_left_country"
 US_BILLING_NAMES = [
     ("James", "Smith"),
     ("John", "Brown"),
@@ -182,6 +205,11 @@ EXTRA_BILLING_STREETS = {
         ("55 Asia Afrika Street", "Bandung", "West Java", "40111"),
         ("23 Basuki Rahmat", "Surabaya", "East Java", "60271"),
     ],
+    "PH": [
+        ("6750 Ayala Avenue", "Makati", "Metro Manila", "1226"),
+        ("32nd Street Bonifacio Global City", "Taguig", "Metro Manila", "1634"),
+        ("10 Archbishop Reyes Avenue", "Cebu City", "Cebu", "6000"),
+    ],
     "MX": [
         ("120 Paseo de la Reforma", "Mexico City", "CDMX", "06600"),
         ("45 Avenida Vallarta", "Guadalajara", "JAL", "44100"),
@@ -269,6 +297,7 @@ COUNTRY_CURRENCY = {
     "MX": "MXN",
     "NL": "EUR",
     "NZ": "NZD",
+    "PH": "PHP",
     "RO": "RON",
     "ZA": "ZAR",
     "TH": "THB",
@@ -278,8 +307,9 @@ COUNTRY_CURRENCY = {
 }
 OPENAI_SUPPORTED_COUNTRY_CODES = {
     "US", "GB", "BR", "IN", "EG", "ID", "TH", "MX", "CO", "ZA", "DE", "FR",
-    "IT", "ES", "NL", "DK", "CA", "AU", "NZ", "KR", "AE", "IL", "JP", "RO", "TR", "VN",
+    "IT", "ES", "NL", "DK", "CA", "AU", "NZ", "KR", "AE", "IL", "JP", "PH", "RO", "TR", "VN",
 }
+PM_BILLING_COUNTRY_CODES = set(SMSBOWER_PAYPAL_COUNTRY_CODES)
 RUN_MODE_COUNTRIES = set(OPENAI_SUPPORTED_COUNTRY_CODES)
 PROVIDER_COUNTRY_BY_MODE = {
     "AE": "AE",
@@ -302,6 +332,7 @@ PROVIDER_COUNTRY_BY_MODE = {
     "MX": "MX",
     "NL": "NL",
     "NZ": "NZ",
+    "PH": "PH",
     "RO": "RO",
     "ZA": "ZA",
     "TH": "TH",
@@ -330,6 +361,7 @@ COUNTRY_PHONE_PREFIX = {
     "MX": "+52",
     "NL": "+31",
     "NZ": "+64",
+    "PH": "+63",
     "RO": "+40",
     "ZA": "+27",
     "TH": "+66",
@@ -337,6 +369,9 @@ COUNTRY_PHONE_PREFIX = {
     "US": "+1",
     "VN": "+84",
 }
+for _country_code, _country_meta in SMSBOWER_PAYPAL_COUNTRY_META.items():
+    COUNTRY_CURRENCY.setdefault(_country_code, str(_country_meta["currency"]))
+    COUNTRY_PHONE_PREFIX.setdefault(_country_code, str(_country_meta["calling_code"]))
 BILLING_PROFILE_CITY_BY_COUNTRY = {
     "BR": ["Sao Paulo", "Rio de Janeiro", "Curitiba"],
     "CO": ["Bogota", "Medellin", "Cali"],
@@ -353,6 +388,7 @@ BILLING_PROFILE_CITY_BY_COUNTRY = {
     "KR": ["Seoul", "Busan", "Incheon"],
     "MX": ["Mexico City", "Guadalajara", "Monterrey"],
     "NL": ["Amsterdam", "Rotterdam", "Utrecht"],
+    "PH": ["Makati", "Taguig", "Cebu City"],
     "RO": ["Bucharest", "Cluj-Napoca", "Timisoara"],
     "TR": ["Istanbul", "Ankara", "Izmir"],
     "VN": ["Ho Chi Minh City", "Hanoi", "Da Nang"],
@@ -363,7 +399,7 @@ POSTAL_PATTERN_BY_COUNTRY = {
     "DE": "#####", "DK": "####", "EG": "#####", "ES": "#####", "GB": "AA# #AA",
     "FR": "#####", "ID": "#####", "IL": "#######", "IN": "######",
     "IT": "#####", "JP": "###-####", "KR": "#####", "MX": "#####",
-    "NL": "#### AA", "NZ": "####", "RO": "######", "TH": "#####", "TR": "#####", "VN": "######",
+    "NL": "#### AA", "NZ": "####", "PH": "####", "RO": "######", "TH": "#####", "TR": "#####", "VN": "######",
     "US": "#####", "ZA": "####",
 }
 BILLING_STREET_POOL = [
@@ -384,9 +420,9 @@ BILLING_PROFILE_BY_COUNTRY = {
         "street_pool": BILLING_STREET_POOL,
         "source": "formatted",
     }
-    for country in OPENAI_SUPPORTED_COUNTRY_CODES
+    for country in PM_BILLING_COUNTRY_CODES
 }
-for precise_country in ("US", "AU", "DE", "TH", "NZ", "CA"):
+for precise_country in ("US", "AU", "DE", "TH", "NZ", "CA", "PH"):
     if precise_country in BILLING_PROFILE_BY_COUNTRY:
         BILLING_PROFILE_BY_COUNTRY[precise_country]["source"] = "precise"
 LOCALE_MAP = {
@@ -424,10 +460,13 @@ class LongLinkRequest(BaseModel):
     checkout_ui_mode: str = "custom"
     payment_locale: str = "en"
     enable_approve_blocked_burst: bool = True
+    enable_playwright_approve_fallback: bool = False
     single_proxy_mode: bool = False
     all_jp_proxy: bool = False
     checkout_proxy_override: str = ""
     provider_proxy_override: str = ""
+    provider_parent_only: bool = False
+    recreate_checkout_per_attempt: bool = False
     approve_proxy_override: str = ""
     promotion_proxy_override: str = ""
     promotion_proxy_country: str = ""
@@ -435,17 +474,38 @@ class LongLinkRequest(BaseModel):
     provider_proxy_pool: list[str] = Field(default_factory=list)
     approve_proxy_pool: list[str] = Field(default_factory=list)
     promotion_proxy_pool: list[str] = Field(default_factory=list)
+    prevalidated_proxy_sessions: bool = False
+    lock_proxy_sessions: bool = False
+    proxy_quality_gate_enabled: bool = False
+    proxy_quality_probe_rounds: int = Field(1, ge=1, le=3)
+    proxy_quality_max_latency_ms: int = Field(12000, ge=2000, le=30000)
+    parent_proxy_rotation_enabled: bool = False
+    parent_proxy_rotation_task_index: int = 1
+    parent_proxy_rotation_total_threads: int = 1
+    parent_proxy_rotation_slot: int = 0
+    parent_proxy_rotation_node_filter: str = ""
+    parent_proxy_rotation_purpose: str = "plus_parent_proxy"
     approve_same_as_checkout: bool = False
     provider_same_as_target: bool = True
     residential_via_clash: bool = False
     residential_clash_proxy: str = ""
     batch_target_country: str = ""
     batch_checkout_proxy_country: str = ""
+    batch_approve_proxy_country: str = ""
     require_zero_stripe_amount: bool = True
+    require_ipv6_egress: bool = False
     checkout_retry_limit: int = Field(CHATGPT_RETRY_ATTEMPTS, ge=1, le=50)
     provider_retry_limit: int = Field(PROXY_EXIT_RETRY_ATTEMPTS, ge=1, le=20)
     strict_same_proxy_ip: bool = True
     strict_approve_same_proxy_ip: bool = False
+    strict_right_same_proxy_ip: bool = False
+    stripe_poll_egress: str = "provider"
+    post_approve_poll_timeout_seconds: int = Field(90, ge=30, le=180)
+    enable_playwright_redirect_fallback: bool = True
+    allow_intermediate_url_fallback: bool = False
+    paypal_confirm_mode: str = "payment_method"
+    paypal_confirm_protocol: str = "standalone"
+    batch_concurrency: int = Field(1, ge=1, le=10)
     device_id: str = ""
     user_agent: str = ""
 
@@ -468,6 +528,10 @@ class LongLinkResponse(BaseModel):
     provider_error: str = ""
     stripe_hosted_url: str
     long_url: str
+    intermediate_url: str = ""
+    intermediate_url_present: bool = False
+    intermediate_fallback_used: bool = False
+    playwright_fallback_used: bool = False
     stripe_amount: str = ""
     stripe_amount_source: str = ""
     link_attempt_count: int = 0
@@ -513,12 +577,51 @@ class BatchResultSaveResponse(BaseModel):
 
 def new_session() -> Any:
     if CurlCffiSession is not None:
-        session = CurlCffiSession(impersonate="chrome136")
+        session = CurlCffiSession(impersonate=CHROME_IMPERSONATE)
     else:
         session = requests.Session()
     if hasattr(session, "trust_env"):
         session.trust_env = False
     return session
+
+
+def close_session(session: Any | None) -> None:
+    if session is None:
+        return
+    try:
+        session.close()
+    except Exception:
+        pass
+    local_proxy = str(getattr(session, "_moyu_proxy_chain_url", "") or "").strip()
+    if local_proxy and proxy_chain_manager is not None:
+        try:
+            proxy_chain_manager.release(local_proxy)
+        except Exception:
+            pass
+    try:
+        setattr(session, "_moyu_proxy_chain_url", "")
+    except Exception:
+        pass
+
+
+def copy_session_state(source_session: Any | None, target_session: Any) -> Any:
+    if source_session is None:
+        return target_session
+    source_headers = getattr(source_session, "headers", None)
+    target_headers = getattr(target_session, "headers", None)
+    if source_headers and target_headers is not None:
+        try:
+            target_headers.update(dict(source_headers))
+        except Exception:
+            pass
+    source_cookies = getattr(source_session, "cookies", None)
+    target_cookies = getattr(target_session, "cookies", None)
+    if source_cookies is not None and target_cookies is not None:
+        try:
+            target_cookies.update(source_cookies)
+        except Exception:
+            pass
+    return target_session
 
 
 def effective_default_proxy(proxy: str = "") -> str:
@@ -584,11 +687,11 @@ def checkout_stage_country(req: LongLinkRequest) -> str:
 
 
 def approve_stage_country(req: LongLinkRequest) -> str:
-    if bool(getattr(req, "approve_same_as_checkout", False)):
-        return checkout_stage_country(req)
-    explicit = str(getattr(req, "batch_target_country", "") or "").strip().upper()
+    explicit = str(getattr(req, "batch_approve_proxy_country", "") or "").strip().upper()
     if explicit:
         return explicit
+    if bool(getattr(req, "approve_same_as_checkout", False)):
+        return checkout_stage_country(req)
     override = str(getattr(req, "approve_proxy_override", "") or "").strip()
     if override:
         return infer_proxy_country(override, "JP")
@@ -746,9 +849,32 @@ def chain_parent_proxy(req: Any) -> str:
     return normalize_proxy_url(str(getattr(req, "residential_clash_proxy", "") or "").strip())
 
 
+def rotate_parent_proxy_for_attempt(req: LongLinkRequest, attempt: int) -> tuple[LongLinkRequest, dict[str, Any]]:
+    if attempt <= 1 or not bool(getattr(req, "parent_proxy_rotation_enabled", False)):
+        return req, {}
+    assignment = proxy_pool_store.assign_proxy(
+        max(1, int(getattr(req, "parent_proxy_rotation_task_index", 1) or 1)) + attempt - 1,
+        fallback="",
+        total_threads=max(1, int(getattr(req, "parent_proxy_rotation_total_threads", 1) or 1)),
+        slot_index=max(0, int(getattr(req, "parent_proxy_rotation_slot", 0) or 0)),
+        node_name_filter=str(getattr(req, "parent_proxy_rotation_node_filter", "") or ""),
+        validate_node=False,
+        purpose=str(getattr(req, "parent_proxy_rotation_purpose", "plus_parent_proxy") or "plus_parent_proxy"),
+    )
+    proxy = normalize_proxy_url(str(assignment.get("proxy") or "").strip())
+    if not proxy:
+        raise RuntimeError(
+            "父代理节点轮换失败："
+            + str(assignment.get("error") or assignment.get("label") or "没有可用节点")
+        )
+    return req.model_copy(update={"residential_clash_proxy": proxy}), assignment
+
+
 def _proxy_url_for_session(proxy: str, parent_proxy: str = "") -> str:
     proxy = normalize_proxy_url(proxy)
     parent_proxy = normalize_proxy_url(parent_proxy)
+    if proxy and parent_proxy and proxy == parent_proxy:
+        return proxy
     if proxy and parent_proxy and proxy_chain_manager is not None:
         try:
             return proxy_chain_manager.proxy_for(proxy, parent_proxy)
@@ -758,9 +884,26 @@ def _proxy_url_for_session(proxy: str, parent_proxy: str = "") -> str:
 
 
 def set_proxy_url(session: Any, proxy: str, parent_proxy: str = "") -> None:
-    proxy = _proxy_url_for_session(proxy, parent_proxy)
-    if proxy:
-        session.proxies = {"http": proxy, "https": proxy}
+    previous_chain = str(getattr(session, "_moyu_proxy_chain_url", "") or "").strip()
+    if previous_chain and proxy_chain_manager is not None:
+        try:
+            proxy_chain_manager.release(previous_chain)
+        except Exception:
+            pass
+        try:
+            setattr(session, "_moyu_proxy_chain_url", "")
+        except Exception:
+            pass
+    direct_proxy = normalize_proxy_url(proxy)
+    parent_proxy = normalize_proxy_url(parent_proxy)
+    effective_proxy = _proxy_url_for_session(direct_proxy, parent_proxy)
+    if effective_proxy:
+        session.proxies = {"http": effective_proxy, "https": effective_proxy}
+    if direct_proxy and parent_proxy and direct_proxy != parent_proxy and effective_proxy != direct_proxy:
+        try:
+            setattr(session, "_moyu_proxy_chain_url", effective_proxy)
+        except Exception:
+            pass
 
 
 def set_proxy(session: Any, proxy: str) -> None:
@@ -820,7 +963,7 @@ def rotate_711_proxy_username(username: str, country: str, session_id: str | Non
         return re.sub(r"-session-[A-Za-z0-9]+", f"-session-{session_id}", rotated, count=1, flags=re.IGNORECASE)
     if re.search(r"-sessTime-", rotated, flags=re.IGNORECASE):
         return re.sub(r"(?=-sessTime-)", f"-session-{session_id}", rotated, count=1, flags=re.IGNORECASE)
-    return f"{rotated}-session-{session_id}-sessTime-5-sessAuto-1"
+    return f"{rotated}-session-{session_id}-sessTime-5"
 
 
 def rotate_kookeey_proxy_session(proxy: str, country: str, *, stage: str = "", slot: int = 0) -> str:
@@ -924,7 +1067,12 @@ def request_with_stage_proxy(req: LongLinkRequest, stage: str, proxy: str, count
     stage = str(stage or "").strip().lower()
     if stage == "checkout":
         field = "checkout_proxy_override" if str(getattr(req, "checkout_proxy_override", "") or "").strip() else "jp_proxy"
-        return req.model_copy(update={field: proxy})
+        update = {field: proxy}
+        if bool(getattr(req, "strict_approve_same_proxy_ip", False)) and bool(
+            getattr(req, "approve_same_as_checkout", False)
+        ):
+            update["approve_proxy_override"] = proxy
+        return req.model_copy(update=update)
     if stage == "approve":
         field = "approve_proxy_override" if str(getattr(req, "approve_proxy_override", "") or "").strip() else "jp_proxy"
         return req.model_copy(update={field: proxy})
@@ -934,6 +1082,10 @@ def request_with_stage_proxy(req: LongLinkRequest, stage: str, proxy: str, count
             if str(getattr(req, "provider_proxy_override", "") or "").strip()
             else {provider_proxy_field(country): proxy}
         )
+        if bool(getattr(req, "strict_approve_same_proxy_ip", False)) and not bool(
+            getattr(req, "approve_same_as_checkout", False)
+        ):
+            update["approve_proxy_override"] = proxy
         return req.model_copy(update=update)
     if stage == "promotion":
         return req.model_copy(
@@ -968,8 +1120,46 @@ def request_with_rotated_approve_session(req: LongLinkRequest, used_bases: set[s
     if single_proxy_mode(req):
         return req.model_copy(update={"jp_proxy": approve_stage_proxy(req)})
     country = approve_stage_country(req)
+    if bool(getattr(req, "strict_approve_same_proxy_ip", False)):
+        return request_with_stage_proxy(req, "approve", approve_stage_proxy(req), country)
     proxy = rotated_stage_proxy_for_attempt(req, "approve", country, approve_stage_proxy(req), used_bases=used_bases)
     return request_with_stage_proxy(req, "approve", proxy, country)
+
+
+def promotion_proxy_for_provider_attempt(
+    req: LongLinkRequest,
+    provider_proxy: str,
+    promotion_country: str,
+    used_bases: set[str] | None = None,
+) -> str:
+    if right_stage_same_proxy_required(req) and provider_stage_country(req) == promotion_country:
+        return provider_proxy
+    return rotated_stage_proxy_for_attempt(
+        req,
+        "promotion",
+        promotion_country,
+        promotion_stage_proxy(req),
+        used_bases=used_bases,
+    )
+
+
+def promotion_probe_for_provider_attempt(
+    req: LongLinkRequest,
+    provider_probe: ProxyProbeResult,
+    promotion_proxy: str,
+    promotion_country: str,
+) -> ProxyProbeResult:
+    label = f"promotion/update/poll {promotion_country}"
+    if right_stage_same_proxy_required(req) and provider_stage_country(req) == promotion_country:
+        return provider_probe.model_copy(update={"label": label, "proxy": promotion_proxy})
+    return probe_proxy(
+        label,
+        promotion_proxy,
+        promotion_country,
+        required=True,
+        parent_proxy=chain_parent_proxy(req),
+        required_ip_version=required_proxy_ip_version(req),
+    )
 
 
 def provider_proxy_field(country: str) -> str:
@@ -1022,7 +1212,14 @@ def is_retryable_network_error(exc: Exception) -> bool:
 def proxy_ip_matches(expected_ip: str, actual_ip: str) -> bool:
     expected = str(expected_ip or "").strip().lower()
     actual = str(actual_ip or "").strip().lower()
-    return bool(expected and actual and expected == actual)
+    if not expected or not actual:
+        return False
+    try:
+        return ipaddress.ip_address(expected.strip("[]").split("%", 1)[0]) == ipaddress.ip_address(
+            actual.strip("[]").split("%", 1)[0]
+        )
+    except ValueError:
+        return expected == actual
 
 
 def html_response_title(text: str) -> str:
@@ -1075,14 +1272,21 @@ def is_retryable_provider_http_exception(exc: HTTPException) -> bool:
 
 def is_retryable_provider_flow_exception(exc: HTTPException) -> bool:
     detail = str(exc.detail or "").lower()
+    if exc.status_code == 504 and "checkout" in detail:
+        return True
     if "checkout promotion update failed" in detail or "checkout taxes update failed" in detail:
         return is_retryable_chatgpt_http_exception(exc)
     retryable_markers = (
         "payment_method_types_mismatch",
+        "stripe_amount_nonzero",
+        "stripe_amount_unknown",
         "stripe submission failed",
         "generic_decline",
         "checkout_confirm_error",
         "submission_attempt",
+        "chatgpt approve retryable result",
+        "chatgpt approve blocked/exception burst failed",
+        "出口不是",
     )
     if any(marker in detail for marker in retryable_markers):
         return True
@@ -1184,7 +1388,14 @@ def fetch_proxy_geo(session: Any) -> tuple[str, str, str]:
 
     raise RuntimeError("；".join(errors[-8:]))
 
-def probe_proxy(label: str, proxy: str, expected_country: str = "", required: bool = False, parent_proxy: str = "") -> ProxyProbeResult:
+def probe_proxy(
+    label: str,
+    proxy: str,
+    expected_country: str = "",
+    required: bool = False,
+    parent_proxy: str = "",
+    required_ip_version: int = 0,
+) -> ProxyProbeResult:
     proxy = normalize_proxy_url(proxy)
     expected_country = str(expected_country or "").strip().upper()
     if not proxy:
@@ -1207,21 +1418,251 @@ def probe_proxy(label: str, proxy: str, expected_country: str = "", required: bo
         session.trust_env = False
     set_proxy_url(session, proxy, parent_proxy)
     try:
-        ip, country_code, country = fetch_proxy_geo(session)
+        try:
+            ip, country_code, country = fetch_proxy_geo(session)
+        except Exception as exc:
+            return ProxyProbeResult(ok=False, label=label, proxy=proxy, error=f"{label} 检测失败: {exc}")
+        result = ProxyProbeResult(
+            ok=True,
+            label=label,
+            proxy=proxy,
+            ip=ip,
+            country=country,
+            country_code=country_code,
+        )
+        if expected_country and country_code != expected_country:
+            result.ok = False
+            result.error = f"{label} 出口不是 {expected_country}: {country_code or '未知'} {result.ip}".strip()
+        if required_ip_version:
+            try:
+                detected_ip_version = ipaddress.ip_address(str(result.ip or "").strip().strip("[]").split("%", 1)[0]).version
+            except ValueError:
+                detected_ip_version = 0
+            if detected_ip_version != required_ip_version:
+                result.ok = False
+                result.error = (
+                    f"{label} 出口不是 IPv{required_ip_version}: "
+                    f"{country_code or '未知'} {result.ip or '未知'}"
+                ).strip()
+        return result
+    finally:
+        close_session(session)
+
+
+def probe_proxy_target(
+    label: str,
+    proxy: str,
+    target_url: str,
+    *,
+    parent_proxy: str = "",
+    timeout: int = 12,
+    max_latency_ms: int = 12000,
+    method: str = "GET",
+    headers: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Check target reachability through the exact proxy chain without mutating checkout state."""
+    proxy = normalize_proxy_url(proxy)
+    started_at = time.perf_counter()
+    if not proxy:
+        return {
+            "ok": False,
+            "label": label,
+            "status_code": 0,
+            "latency_ms": 0,
+            "error": f"{label} 代理不能为空",
+        }
+    session = new_session()
+    if hasattr(session, "trust_env"):
+        session.trust_env = False
+    set_proxy_url(session, proxy, parent_proxy)
+    try:
+        response = session.request(
+            str(method or "GET").strip().upper(),
+            target_url,
+            headers=dict(headers or {}),
+            timeout=max(3, min(30, int(timeout))),
+            allow_redirects=False,
+        )
+        latency_ms = int((time.perf_counter() - started_at) * 1000)
+        status_code = int(getattr(response, "status_code", 0) or 0)
+        if status_code in {403, 407, 429} or status_code >= 500:
+            return {
+                "ok": False,
+                "label": label,
+                "status_code": status_code,
+                "latency_ms": latency_ms,
+                "error": f"{label} 目标探测被拒绝: HTTP {status_code}",
+            }
+        if latency_ms > max(1000, int(max_latency_ms)):
+            return {
+                "ok": False,
+                "label": label,
+                "status_code": status_code,
+                "latency_ms": latency_ms,
+                "error": f"{label} 目标探测延迟过高: {latency_ms}ms",
+            }
+        return {
+            "ok": 200 <= status_code < 500,
+            "label": label,
+            "status_code": status_code,
+            "latency_ms": latency_ms,
+            "error": "" if 200 <= status_code < 500 else f"{label} 目标探测无有效响应",
+        }
     except Exception as exc:
-        return ProxyProbeResult(ok=False, label=label, proxy=proxy, error=f"{label} 检测失败: {exc}")
-    result = ProxyProbeResult(
-        ok=True,
-        label=label,
-        proxy=proxy,
-        ip=ip,
-        country=country,
-        country_code=country_code,
+        return {
+            "ok": False,
+            "label": label,
+            "status_code": 0,
+            "latency_ms": int((time.perf_counter() - started_at) * 1000),
+            "error": f"{label} 目标探测失败: {exc}",
+        }
+    finally:
+        close_session(session)
+
+
+def check_request_proxy_quality(
+    req: LongLinkRequest,
+    *,
+    rounds: int | None = None,
+    max_latency_ms: int | None = None,
+) -> dict[str, Any]:
+    """Validate the exact three proxy sessions selected for one extraction attempt."""
+    probe_rounds = max(1, min(3, int(rounds or getattr(req, "proxy_quality_probe_rounds", 1) or 1)))
+    latency_limit = max(
+        2000,
+        min(30000, int(max_latency_ms or getattr(req, "proxy_quality_max_latency_ms", 12000) or 12000)),
     )
-    if expected_country and country_code != expected_country:
-        result.ok = False
-        result.error = f"{label} 出口不是 {expected_country}: {country_code or '未知'} {result.ip}".strip()
-    return result
+    parent_proxy = chain_parent_proxy(req)
+    stages = [
+        (
+            "checkout",
+            "Checkout/Approve",
+            checkout_stage_proxy(req),
+            checkout_stage_country(req),
+            "https://chatgpt.com/backend-api/payments/checkout",
+            "GET",
+            {},
+        ),
+        (
+            "provider",
+            "Provider/PM/Poll",
+            provider_stage_proxy(req),
+            "" if bool(getattr(req, "provider_parent_only", False)) else provider_stage_country(req),
+            "https://api.stripe.com/v1/payment_methods",
+            "GET",
+            {},
+        ),
+        (
+            "promotion",
+            "Promotion/Taxes",
+            promotion_stage_proxy(req),
+            promotion_stage_country(req),
+            "https://chatgpt.com/backend-api/payments/checkout/update",
+            "OPTIONS",
+            {
+                "Authorization": f"Bearer {normalize_access_token(req.access_token)}",
+                "Origin": "https://chatgpt.com",
+                "Referer": "https://chatgpt.com/",
+                "Access-Control-Request-Method": "POST",
+                "Access-Control-Request-Headers": "authorization,content-type,oai-device-id,x-openai-target-path,x-openai-target-route",
+                "x-openai-target-path": "/backend-api/payments/checkout/update",
+                "x-openai-target-route": "/backend-api/payments/checkout/update",
+            },
+        ),
+    ]
+    results: list[dict[str, Any]] = []
+    seen_ips: dict[str, tuple[str, str]] = {}
+    ip_version = required_proxy_ip_version(req)
+    for stage, label, proxy, expected_country, target_url, method, headers in stages:
+        ensure_not_cancelled()
+        ips: list[str] = []
+        country_code = ""
+        geo_latencies: list[int] = []
+        error = ""
+        for round_index in range(1, probe_rounds + 1):
+            started_at = time.perf_counter()
+            probe = probe_proxy(
+                label,
+                proxy,
+                expected_country,
+                required=True,
+                parent_proxy=parent_proxy,
+                required_ip_version=ip_version,
+            )
+            geo_latencies.append(int((time.perf_counter() - started_at) * 1000))
+            if not probe.ok:
+                error = probe.error or f"{label} 出口检测失败"
+                break
+            country_code = str(probe.country_code or "").strip().upper()
+            probe_ip = str(probe.ip or "").strip()
+            if not probe_ip:
+                error = f"{label} 未返回出口 IP"
+                break
+            ips.append(probe_ip)
+            if round_index > 1 and probe_ip != ips[0]:
+                error = f"{label} sticky IP 漂移: {ips[0]} → {probe_ip}"
+                break
+        if not error and geo_latencies and max(geo_latencies) > latency_limit:
+            error = f"{label} 出口检测延迟过高: {max(geo_latencies)}ms"
+        target_result: dict[str, Any] = {}
+        if not error:
+            target_result = probe_proxy_target(
+                label,
+                proxy,
+                target_url,
+                parent_proxy=parent_proxy,
+                timeout=max(3, int(latency_limit / 1000) + 2),
+                max_latency_ms=latency_limit,
+                method=method,
+                headers=headers,
+            )
+            if not bool(target_result.get("ok")):
+                error = str(target_result.get("error") or f"{label} 目标站不可达")
+        stage_ip = ips[0] if ips else ""
+        if not error and stage_ip in seen_ips:
+            previous_stage, previous_label = seen_ips[stage_ip]
+            provider_promotion_share = (
+                previous_stage == "provider"
+                and stage == "promotion"
+                and provider_stage_country(req) == promotion_stage_country(req)
+            )
+            if not provider_promotion_share:
+                error = f"{label} 与 {previous_label} 共用出口 {stage_ip}，未形成所需独立出口"
+        result = {
+            "stage": stage,
+            "label": label,
+            "ok": not error,
+            "country": country_code or expected_country,
+            "expected_country": expected_country,
+            "ip": stage_ip,
+            "sticky": bool(ips) and len(set(ips)) == 1,
+            "rounds": len(ips),
+            "geo_latency_ms": max(geo_latencies) if geo_latencies else 0,
+            "target_status": int(target_result.get("status_code") or 0),
+            "target_latency_ms": int(target_result.get("latency_ms") or 0),
+            "error": short_error(error, 280),
+        }
+        results.append(result)
+        if error:
+            return {"ok": False, "failed_stage": stage, "error": result["error"], "stages": results}
+        seen_ips[stage_ip] = (stage, label)
+    return {"ok": True, "failed_stage": "", "error": "", "stages": results}
+
+
+def required_proxy_ip_version(req: Any) -> int:
+    return 6 if bool(getattr(req, "require_ipv6_egress", False)) else 0
+
+
+def right_stage_same_proxy_required(req: Any) -> bool:
+    return bool(getattr(req, "strict_right_same_proxy_ip", False))
+
+
+def proxy_probe_failure_category(probe: ProxyProbeResult, expected_country: str = "") -> str:
+    if "出口不是 IPv6" in str(probe.error or ""):
+        return "proxy_ip_family_mismatch"
+    if expected_country and probe.country_code and probe.country_code != expected_country:
+        return "proxy_country_mismatch"
+    return "proxy_network"
 
 
 def check_request_proxies(req: LongLinkRequest) -> list[ProxyProbeResult]:
@@ -1234,24 +1675,33 @@ def check_request_proxies(req: LongLinkRequest) -> list[ProxyProbeResult]:
     promotion_proxy = promotion_stage_proxy(req)
     promotion_country = promotion_stage_country(req)
     parent_proxy = chain_parent_proxy(req)
+    ip_version = required_proxy_ip_version(req)
     if single_proxy_mode(req):
-        results = [probe_proxy("统一代理", checkout_proxy, "", True, parent_proxy)]
+        results = [probe_proxy("统一代理", checkout_proxy, "", True, parent_proxy, ip_version)]
     else:
-        results = [probe_proxy(f"checkout {checkout_country}", checkout_proxy, checkout_country, True, parent_proxy)]
+        results = [probe_proxy(f"checkout {checkout_country}", checkout_proxy, checkout_country, True, parent_proxy, ip_version)]
         if provider_proxy != checkout_proxy:
-            results.append(probe_proxy(f"provider {provider_country}", provider_proxy, provider_country, True, parent_proxy))
+            results.append(probe_proxy(f"provider {provider_country}", provider_proxy, provider_country, True, parent_proxy, ip_version))
         if approve_proxy != checkout_proxy:
-            results.append(probe_proxy(f"approve {approve_country}", approve_proxy, approve_country, True, parent_proxy))
+            results.append(probe_proxy(f"approve {approve_country}", approve_proxy, approve_country, True, parent_proxy, ip_version))
         if promotion_proxy:
-            results.append(probe_proxy(f"promotion/update/poll {promotion_country}", promotion_proxy, promotion_country, True, parent_proxy))
-    mark_same_exit(results)
+            results.append(probe_proxy(f"promotion/update/poll {promotion_country}", promotion_proxy, promotion_country, True, parent_proxy, ip_version))
+    if not ip_version and not right_stage_same_proxy_required(req):
+        mark_same_exit(results)
     return results
 
 
 def check_provider_proxy(req: LongLinkRequest) -> ProxyProbeResult:
     country = provider_stage_country(req)
-    expected_country = "" if single_proxy_mode(req) else country
-    return probe_proxy(provider_stage_label(req), provider_stage_proxy(req), expected_country, required=True, parent_proxy=chain_parent_proxy(req))
+    expected_country = "" if single_proxy_mode(req) or bool(getattr(req, "provider_parent_only", False)) else country
+    return probe_proxy(
+        provider_stage_label(req),
+        provider_stage_proxy(req),
+        expected_country,
+        required=True,
+        parent_proxy=chain_parent_proxy(req),
+        required_ip_version=required_proxy_ip_version(req),
+    )
 
 
 def checkout_retry_limit(req: Any) -> int:
@@ -1307,7 +1757,7 @@ def normalize_country(country: str) -> str:
     country = str(country or "").strip().upper()
     if not country:
         return "US"
-    if country in OPENAI_SUPPORTED_COUNTRY_CODES:
+    if country in PM_BILLING_COUNTRY_CODES:
         return country
     raise HTTPException(status_code=400, detail=f"不支持的账单资料地区: {country}")
 
@@ -1445,7 +1895,10 @@ def build_chatgpt_session(
             "Content-Type": "application/json",
             "oai-device-id": device_id,
             "oai-language": "en-US",
-            "sec-ch-ua": '"Google Chrome";v="147", "Not.A/Brand";v="8", "Chromium";v="147"',
+            "sec-ch-ua": (
+                f'"Google Chrome";v="{CHROME_MAJOR_VERSION}", '
+                f'"Not.A/Brand";v="8", "Chromium";v="{CHROME_MAJOR_VERSION}"'
+            ),
             "sec-ch-ua-mobile": "?0",
             "sec-ch-ua-platform": '"Windows"',
             "sec-fetch-dest": "empty",
@@ -1454,16 +1907,7 @@ def build_chatgpt_session(
             "Cookie": f"oai-did={device_id}",
         }
     )
-    source_headers = getattr(source_session, "headers", None)
-    if source_headers:
-        session.headers.update(dict(source_headers))
-    source_cookies = getattr(source_session, "cookies", None)
-    target_cookies = getattr(session, "cookies", None)
-    if source_cookies is not None and target_cookies is not None:
-        try:
-            target_cookies.update(source_cookies)
-        except Exception:
-            pass
+    copy_session_state(source_session, session)
     set_proxy_url(session, proxy_override or checkout_stage_proxy(req), chain_parent_proxy(req))
     return session
 
@@ -1478,10 +1922,6 @@ def create_checkout(req: LongLinkRequest, chatgpt_session: Any | None = None) ->
         "billing_details": {
             "country": billing_country,
             "currency": currency,
-        },
-        "promo_campaign": {
-            "promo_campaign_id": "plus-1-month-free",
-            "is_coupon_from_query_param": False,
         },
         "checkout_ui_mode": checkout_ui_mode,
     }
@@ -1515,26 +1955,57 @@ def create_checkout(req: LongLinkRequest, chatgpt_session: Any | None = None) ->
     }
 
 
-def create_checkout_with_retry(req: LongLinkRequest, emit: Any | None = None) -> tuple[LongLinkRequest, Any, dict[str, Any]]:
+def create_checkout_with_retry(
+    req: LongLinkRequest,
+    emit: Any | None = None,
+    *,
+    max_attempts_override: int | None = None,
+    rotate_first_attempt: bool = True,
+) -> tuple[LongLinkRequest, Any, dict[str, Any]]:
     last_error = ""
-    max_attempts = checkout_retry_limit(req)
+    if not req.device_id.strip():
+        req = req.model_copy(update={"device_id": str(uuid.uuid4())})
+    max_attempts = (
+        max(1, min(50, int(max_attempts_override)))
+        if max_attempts_override is not None
+        else checkout_retry_limit(req)
+    )
     used_checkout_bases: set[str] = set()
     for attempt in range(1, max_attempts + 1):
         ensure_not_cancelled()
         country = checkout_stage_country(req)
-        attempt_req = request_with_rotated_checkout_session(req, used_bases=used_checkout_bases)
+        attempt_req = (
+            request_with_rotated_checkout_session(req, used_bases=used_checkout_bases)
+            if rotate_first_attempt or attempt > 1
+            else req
+        )
         probe_label = "统一代理" if single_proxy_mode(attempt_req) else f"checkout {country}"
         expected_country = "" if single_proxy_mode(attempt_req) else country
         if emit:
             emit("checkout", f"checkout 第 {attempt}/{max_attempts} 次：正在检测 {probe_label}。")
-        probe = probe_proxy(probe_label, checkout_stage_proxy(attempt_req), expected_country, required=True, parent_proxy=chain_parent_proxy(attempt_req))
+        probe = probe_proxy(
+            probe_label,
+            checkout_stage_proxy(attempt_req),
+            expected_country,
+            required=True,
+            parent_proxy=chain_parent_proxy(attempt_req),
+            required_ip_version=required_proxy_ip_version(attempt_req),
+        )
         if not probe.ok:
             last_error = probe.error or f"{probe_label} 检测失败"
             if emit:
                 emit("checkout", f"checkout 第 {attempt} 次 {probe_label} 不可用：{last_error}")
             continue
         if emit:
-            emit("checkout", f"{probe_label} 出口：{probe.ip} / {probe.country_code} {probe.country}。")
+            emit(
+                "checkout",
+                f"{probe_label} 出口：{probe.ip} / {probe.country_code} {probe.country}。",
+                proxy_stage="checkout",
+                proxy_ip=probe.ip,
+                proxy_country_code=probe.country_code,
+                expected_country=country,
+            )
+        chatgpt = None
         try:
             if emit:
                 emit("checkout", f"checkout 第 {attempt}/{max_attempts} 次：正在创建 ChatGPT checkout。")
@@ -1544,16 +2015,52 @@ def create_checkout_with_retry(req: LongLinkRequest, emit: Any | None = None) ->
             checkout["checkout_proxy_country_code"] = probe.country_code
             return attempt_req, chatgpt, checkout
         except HTTPException as exc:
+            detail = str(exc.detail or exc)
+            close_session(chatgpt)
+            chatgpt = None
+            if is_html_forbidden_checkout_action(exc):
+                try:
+                    if emit:
+                        emit(
+                            "checkout",
+                            "Checkout API 返回 HTML 403；保持同一住宅出口，切换真实 Chromium 重试纯 Checkout 创建。",
+                            detail=detail,
+                            checkout_transport="playwright",
+                        )
+                    checkout = create_checkout_via_playwright(attempt_req)
+                    checkout["checkout_proxy_ip"] = probe.ip
+                    checkout["checkout_proxy_country_code"] = probe.country_code
+                    chatgpt = build_chatgpt_session(attempt_req)
+                    if emit:
+                        emit(
+                            "checkout",
+                            "Chromium Checkout 创建成功，继续切换优惠国家 IP 执行 Promotion/Taxes。",
+                            checkout_transport="playwright",
+                        )
+                    return attempt_req, chatgpt, checkout
+                except Exception as browser_error:
+                    close_session(chatgpt)
+                    chatgpt = None
+                    detail = (
+                        f"{detail}; playwright checkout fallback failed: "
+                        f"{short_error(str(getattr(browser_error, 'detail', browser_error)), 300)}"
+                    )
             if not is_retryable_chatgpt_http_exception(exc):
                 raise
-            last_error = str(exc.detail or exc)
+            last_error = detail
             if emit:
-                emit("checkout", f"checkout 第 {attempt} 次返回 HTML/风控/限流，正在更换 {country} session：{short_error(last_error)}")
+                emit(
+                    "checkout",
+                    f"checkout 第 {attempt} 次返回 HTML/风控/限流，正在更换 {country} session：{short_error(last_error)}",
+                    detail=last_error,
+                    failure_category="checkout_blocked",
+                )
                 if attempt < max_attempts:
                     emit("checkout", f"checkout 可重试错误，{PROXY_EXIT_RETRY_DELAY_SECONDS}秒后重试 {attempt + 1}/{max_attempts}。")
             if attempt < max_attempts:
                 cancellable_sleep(PROXY_EXIT_RETRY_DELAY_SECONDS)
         except Exception as exc:
+            close_session(chatgpt)
             if not is_retryable_network_error(exc):
                 raise
             last_error = str(exc)
@@ -1624,15 +2131,29 @@ def stripe_init(
         "_stripe_version": STRIPE_VERSION_FULL,
     }
     url = f"https://api.stripe.com/v1/payment_pages/{cs_id}/init"
-    response = stripe.get(url, params=get_params, timeout=DEFAULT_TIMEOUT)
-    if response.status_code >= 400:
-        fallback_params = dict(get_params)
-        fallback_params.pop("eid", None)
-        fallback_params.pop("elements_locale", None)
-        fallback_params["_stripe_version"] = STRIPE_VERSION_FULL
-        response = stripe.get(url, params=fallback_params, timeout=DEFAULT_TIMEOUT)
-    if response.status_code >= 400:
-        response = stripe.post(url, data=body, timeout=DEFAULT_TIMEOUT)
+    confirm_protocol = str(getattr(req, "paypal_confirm_protocol", "standalone") or "standalone").strip().lower()
+    if confirm_protocol == "minimal":
+        response = stripe.post(
+            url,
+            data={
+                "key": stripe_pk,
+                "eid": "NA",
+                "browser_locale": browser_locale,
+                "browser_timezone": "America/Los_Angeles",
+                "redirect_type": "url",
+            },
+            timeout=DEFAULT_TIMEOUT,
+        )
+    else:
+        response = stripe.get(url, params=get_params, timeout=DEFAULT_TIMEOUT)
+        if response.status_code >= 400:
+            fallback_params = dict(get_params)
+            fallback_params.pop("eid", None)
+            fallback_params.pop("elements_locale", None)
+            fallback_params["_stripe_version"] = STRIPE_VERSION_FULL
+            response = stripe.get(url, params=fallback_params, timeout=DEFAULT_TIMEOUT)
+        if response.status_code >= 400:
+            response = stripe.post(url, data=body, timeout=DEFAULT_TIMEOUT)
     if response.status_code >= 400:
         detail = response.text[:500]
         try:
@@ -1649,6 +2170,10 @@ def stripe_init(
             detail=f"stripe init failed: {detail}",
         )
     payload = response.json() or {}
+    if isinstance(payload, dict):
+        # Stripe JS generates this once for the Elements lifecycle. Keep the init
+        # value so payment-method creation and confirm use the same client id.
+        payload["_client_stripe_js_id"] = stripe_js_id
     if isinstance(payload, dict) and not payload.get("stripe_hosted_url"):
         payload["stripe_hosted_url"] = stripe_checkout_long_url(
             cs_id,
@@ -1691,8 +2216,21 @@ def stripe_checkout_long_url(cs_id: str, country: str, processor_entity: str = "
     )
 
 
-def stripe_confirm_return_url(cs_id: str, checkout: dict[str, Any], stripe_hosted_url: str) -> str:
-    hosted_url = to_openai_pay_url(stripe_hosted_url) or stripe_checkout_long_url(
+def stripe_confirm_return_url(
+    cs_id: str,
+    checkout: dict[str, Any],
+    stripe_hosted_url: str,
+    init_payload: dict[str, Any] | None = None,
+) -> str:
+    init_payload = init_payload if isinstance(init_payload, dict) else {}
+    raw_url = str(
+        init_payload.get("url")
+        or init_payload.get("hosted_checkout_url")
+        or init_payload.get("stripe_hosted_url")
+        or stripe_hosted_url
+        or ""
+    ).strip()
+    hosted_url = to_openai_pay_url(raw_url) or stripe_checkout_long_url(
         cs_id,
         checkout["billing_country"],
         checkout.get("processor_entity", ""),
@@ -1710,6 +2248,28 @@ def stripe_confirm_return_url(cs_id: str, checkout: dict[str, Any], stripe_hoste
         )
         return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(query), parsed.fragment))
     return hosted_url
+
+
+def stripe_confirm_referrer_url(
+    cs_id: str,
+    checkout: dict[str, Any],
+    stripe_hosted_url: str,
+    init_payload: dict[str, Any] | None = None,
+) -> str:
+    init_payload = init_payload if isinstance(init_payload, dict) else {}
+    raw_url = str(
+        init_payload.get("hosted_checkout_url")
+        or init_payload.get("stripe_hosted_url")
+        or init_payload.get("url")
+        or stripe_hosted_url
+        or stripe_checkout_long_url(
+            cs_id,
+            checkout["billing_country"],
+            checkout.get("processor_entity", ""),
+        )
+    ).strip()
+    parsed = urlsplit(to_openai_pay_url(raw_url))
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, parsed.query, ""))
 
 
 def summarize_payment_method_hints(payload: Any, limit: int = 24) -> str:
@@ -1760,8 +2320,64 @@ def summarize_payment_method_hints(payload: Any, limit: int = 24) -> str:
     return "；".join(hints[:limit]) or "未在 init payload 中找到支付方式字段"
 
 
+def classify_paypal_availability(payload: Any) -> dict[str, Any]:
+    methods: set[str] = set()
+    evidence_paths: list[str] = []
+
+    def add_methods(value: Any) -> None:
+        if isinstance(value, str):
+            for item in re.split(r"[,;|\s]+", value):
+                normalized = item.strip().lower()
+                if normalized:
+                    methods.add(normalized)
+            return
+        if isinstance(value, (list, tuple, set)):
+            for item in value:
+                add_methods(item)
+            return
+        if isinstance(value, dict):
+            direct = value.get("type") or value.get("id") or value.get("name")
+            if direct:
+                add_methods(direct)
+                return
+            for key, item in value.items():
+                if isinstance(item, (bool, dict, list)):
+                    normalized = str(key or "").strip().lower()
+                    if normalized:
+                        methods.add(normalized)
+
+    def walk(value: Any, path: str = "root", depth: int = 0) -> None:
+        if depth > 8:
+            return
+        if isinstance(value, dict):
+            for key, item in value.items():
+                key_text = str(key or "")
+                next_path = f"{path}.{key_text}"
+                if key_text.lower() in PAYPAL_METHOD_LIST_KEYS:
+                    evidence_paths.append(next_path)
+                    add_methods(item)
+                walk(item, next_path, depth + 1)
+        elif isinstance(value, list):
+            for index, item in enumerate(value[:100]):
+                walk(item, f"{path}[{index}]", depth + 1)
+
+    walk(payload)
+    ordered_methods = sorted(methods)
+    if "paypal" in methods:
+        status = PAYPAL_AVAILABILITY_SUPPORTED
+    elif evidence_paths and methods:
+        status = PAYPAL_AVAILABILITY_UNSUPPORTED
+    else:
+        status = PAYPAL_AVAILABILITY_UNKNOWN
+    return {
+        "status": status,
+        "methods": ordered_methods,
+        "evidence_paths": evidence_paths[:20],
+    }
+
+
 def init_payload_has_paypal_hint(payload: Any) -> bool:
-    return "paypal" in summarize_payment_method_hints(payload, limit=80).lower()
+    return classify_paypal_availability(payload)["status"] == PAYPAL_AVAILABILITY_SUPPORTED
 
 
 def expected_amount(init_payload: Any) -> str:
@@ -1771,12 +2387,18 @@ def expected_amount(init_payload: Any) -> str:
 def stripe_amount_info(init_payload: Any) -> tuple[str, str]:
     if not isinstance(init_payload, dict):
         return "", "missing_payload"
+    elements_options = init_payload.get("elements_options")
+    if isinstance(elements_options, dict) and elements_options.get("amount") is not None:
+        return str(elements_options.get("amount")), "elements_options.amount"
     total_summary = init_payload.get("total_summary")
     if isinstance(total_summary, dict) and total_summary.get("due") is not None:
         return str(total_summary.get("due")), "total_summary.due"
     invoice = init_payload.get("invoice")
     if isinstance(invoice, dict) and invoice.get("amount_due") is not None:
         return str(invoice.get("amount_due")), "invoice.amount_due"
+    line_item_group = init_payload.get("line_item_group")
+    if isinstance(line_item_group, dict) and line_item_group.get("total") is not None:
+        return str(line_item_group.get("total")), "line_item_group.total"
     line_items = init_payload.get("line_items")
     if isinstance(line_items, list):
         total = 0
@@ -1810,9 +2432,12 @@ def is_zero_amount(amount: Any) -> bool:
 def stripe_context(cs_id: str, init_payload: dict[str, Any], req: LongLinkRequest) -> dict[str, Any]:
     _, elements_locale = locale_parts(req.payment_locale)
     return {
-        "stripe_js_id": str(uuid.uuid4()),
-        "elements_session_id": f"elements_session_{uuid.uuid4().hex[:11]}",
+        "stripe_js_id": str(init_payload.get("_client_stripe_js_id") or uuid.uuid4()),
+        "elements_session_id": str(init_payload.get("elements_session_id") or f"elements_session_{uuid.uuid4().hex[:11]}"),
         "elements_session_config_id": str(init_payload.get("config_id") or uuid.uuid4()),
+        "guid": uuid.uuid4().hex,
+        "muid": uuid.uuid4().hex,
+        "sid": uuid.uuid4().hex,
         "config_id": init_payload.get("config_id") or "",
         "init_checksum": init_payload.get("init_checksum") or "",
         "currency": str(init_payload.get("currency") or currency_for_country(effective_country(req))).lower(),
@@ -1820,6 +2445,113 @@ def stripe_context(cs_id: str, init_payload: dict[str, Any], req: LongLinkReques
         "locale": elements_locale,
         "runtime_version": DEFAULT_STRIPE_RUNTIME_VERSION,
     }
+
+
+def merge_stripe_checkout_payload(base: dict[str, Any], overlay: Any) -> dict[str, Any]:
+    result = dict(base if isinstance(base, dict) else {})
+    if not isinstance(overlay, dict):
+        return result
+    for key in (
+        "init_checksum",
+        "total_summary",
+        "invoice",
+        "line_item_group",
+        "payment_method_types",
+        "ordered_payment_method_types",
+        "visible_payment_method_types",
+        "payment_method_specs",
+        "elements_options",
+        "config_id",
+        "url",
+        "hosted_checkout_url",
+        "stripe_hosted_url",
+        "return_url",
+        "success_url",
+        "ui_mode",
+        "customer_email",
+        "currency",
+    ):
+        if overlay.get(key) is not None:
+            result[key] = overlay[key]
+    return result
+
+
+def _stripe_int(value: Any) -> tuple[int, bool]:
+    if value is None or isinstance(value, str) and not value.strip():
+        return 0, False
+    try:
+        return int(value), True
+    except (TypeError, ValueError):
+        return 0, False
+
+
+def _stripe_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def stripe_display_amounts(payload: Any) -> dict[str, str]:
+    checkout = payload if isinstance(payload, dict) else {}
+    invoice = checkout.get("invoice") if isinstance(checkout.get("invoice"), dict) else {}
+    summary = checkout.get("total_summary") if isinstance(checkout.get("total_summary"), dict) else {}
+    due, _ = _stripe_int(summary.get("due") if summary.get("due") is not None else invoice.get("amount_due"))
+    total, total_ok = _stripe_int(summary.get("total"))
+    if not total_ok:
+        total, _ = _stripe_int(invoice.get("amount_due") if invoice.get("amount_due") is not None else due)
+    subtotal, subtotal_ok = _stripe_int(summary.get("subtotal"))
+    if not subtotal_ok:
+        subtotal = total
+    exclusive_tax = 0
+    inclusive_tax = 0
+    tax_amounts = invoice.get("total_tax_amounts") if isinstance(invoice.get("total_tax_amounts"), list) else []
+    for item in tax_amounts:
+        if not isinstance(item, dict):
+            continue
+        amount, ok = _stripe_int(item.get("amount") if item.get("amount") is not None else item.get("tax_amount"))
+        if not ok:
+            continue
+        behavior = str(item.get("taxability_reason") or item.get("tax_behavior") or item.get("inclusive") or "").lower()
+        if "inclusive" in behavior or behavior == "true":
+            inclusive_tax += amount
+        else:
+            exclusive_tax += amount
+    return {
+        "subtotal": str(subtotal),
+        "total_exclusive_tax": str(exclusive_tax),
+        "total_inclusive_tax": str(inclusive_tax),
+        "total_discount_amount": str(max(subtotal - total, 0)),
+        "shipping_rate_amount": "0",
+    }
+
+
+def stripe_confirm_expected_amounts(payload: Any, fallback: str = "0") -> tuple[str, str]:
+    checkout = payload if isinstance(payload, dict) else {}
+    expected, ok = _stripe_int(fallback)
+    if not ok:
+        expected = 0
+    summary = checkout.get("total_summary") if isinstance(checkout.get("total_summary"), dict) else {}
+    total_due, has_total_due = _stripe_int(summary.get("due"))
+    if has_total_due:
+        expected = total_due
+    line_group = checkout.get("line_item_group") if isinstance(checkout.get("line_item_group"), dict) else {}
+    line_total, has_line_total = _stripe_int(line_group.get("total"))
+    if has_line_total:
+        expected = line_total
+    surcharge = line_group.get("automatic_surcharge_settings") if isinstance(line_group.get("automatic_surcharge_settings"), dict) else {}
+    if _stripe_bool(surcharge.get("enabled")) and has_total_due:
+        expected = total_due
+    invoice = checkout.get("invoice") if isinstance(checkout.get("invoice"), dict) else {}
+    amount_due, has_amount_due = _stripe_int(invoice.get("amount_due"))
+    if has_amount_due:
+        has_bca = bool(str(invoice.get("billing_cycle_anchor") or "").strip())
+        if has_bca and not _stripe_bool(invoice.get("has_prorations")):
+            return (str(total_due) if has_total_due else "0", str(amount_due))
+        if not has_total_due:
+            expected = amount_due
+    return str(expected), ""
 
 
 def random_postal_code(pattern: str) -> str:
@@ -1853,7 +2585,7 @@ def billing_for_country(country: str) -> dict[str, str]:
     elif country in EXTRA_BILLING_STREETS:
         first_name, last_name = random.choice(EXTRA_BILLING_NAMES)
         line1, city, state, postal_code = random.choice(EXTRA_BILLING_STREETS[country])
-    elif country in OPENAI_SUPPORTED_COUNTRY_CODES:
+    elif country in PM_BILLING_COUNTRY_CODES:
         profile = BILLING_PROFILE_BY_COUNTRY[country]
         first_name, last_name = random.choice(EXTRA_BILLING_NAMES)
         line1 = f"{random.randint(10, 999)} {random.choice(profile['street_pool'])}"
@@ -1865,7 +2597,10 @@ def billing_for_country(country: str) -> dict[str, str]:
     suffix = random.randint(1000, 9999)
     profile = BILLING_PROFILE_BY_COUNTRY.get(country, {})
     phone_prefix = str(profile.get("phone_prefix") or COUNTRY_PHONE_PREFIX.get(country, "+1"))
-    phone = f"{phone_prefix}{random.randint(100000000, 999999999)}"
+    if phone_prefix == "+1":
+        phone = f"{phone_prefix}{random.randint(200, 999)}{random.randint(200, 999)}{random.randint(1000, 9999)}"
+    else:
+        phone = f"{phone_prefix}{random.randint(100000000, 999999999)}"
     return {
         "name": f"{first_name} {last_name}",
         "email": f"{first_name.lower()}.{last_name.lower()}{suffix}@example.com",
@@ -1878,7 +2613,43 @@ def billing_for_country(country: str) -> dict[str, str]:
     }
 
 
-def build_stripe_session(req: LongLinkRequest, proxy_override: str = "") -> Any:
+def access_token_billing_identity(access_token: str) -> dict[str, str]:
+    claims = jwt_payload(access_token)
+    profile = claims.get("https://api.openai.com/profile")
+    profile = profile if isinstance(profile, dict) else {}
+    email = str(profile.get("email") or claims.get("email") or "").strip()[:254]
+    if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email):
+        email = ""
+
+    given_name = str(profile.get("given_name") or claims.get("given_name") or "").strip()
+    family_name = str(profile.get("family_name") or claims.get("family_name") or "").strip()
+    name = str(profile.get("name") or claims.get("name") or "").strip()
+    if not name:
+        name = " ".join(part for part in (given_name, family_name) if part).strip()
+    if not name and email:
+        local_part = email.split("@", 1)[0].split("+", 1)[0]
+        words = [part for part in re.split(r"[._-]+", local_part) if part]
+        if words:
+            name = " ".join(part[:1].upper() + part[1:] for part in words)
+    name = re.sub(r"\s+", " ", name).strip()[:120]
+    return {"email": email, "name": name}
+
+
+def billing_for_request(req: LongLinkRequest, country: str) -> dict[str, str]:
+    billing = billing_for_country(country)
+    identity = access_token_billing_identity(req.access_token)
+    if identity.get("email"):
+        billing["email"] = identity["email"]
+    if identity.get("name"):
+        billing["name"] = identity["name"]
+    return billing
+
+
+def build_stripe_session(
+    req: LongLinkRequest,
+    proxy_override: str = "",
+    source_session: Any | None = None,
+) -> Any:
     stripe = new_session()
     stripe.headers.update(
         {
@@ -1886,6 +2657,7 @@ def build_stripe_session(req: LongLinkRequest, proxy_override: str = "") -> Any:
             "Accept-Language": "en-US,en;q=0.9",
         }
     )
+    copy_session_state(source_session, stripe)
     if proxy_override:
         set_proxy_url(stripe, proxy_override, chain_parent_proxy(req))
     else:
@@ -1924,6 +2696,77 @@ def post_chatgpt_checkout_action(
         return response.json() or {}
     except Exception:
         return {}
+
+
+def is_html_forbidden_checkout_action(error: HTTPException) -> bool:
+    detail = str(error.detail or "").lower()
+    return error.status_code == 403 and "content_type=text/html" in detail
+
+
+def run_checkout_action_with_sticky_retry(
+    req: LongLinkRequest,
+    source_session: Any,
+    proxy: str,
+    action: Any,
+    *,
+    label: str,
+    emit: Any | None = None,
+    attempts: int = 3,
+    reuse_source_session: bool = False,
+) -> tuple[Any, dict[str, Any]]:
+    """Retry one ChatGPT checkout action without changing its sticky exit."""
+    max_attempts = max(1, min(5, int(attempts or 3)))
+    session = (
+        source_session
+        if reuse_source_session
+        else build_chatgpt_session(req, proxy_override=proxy, source_session=source_session)
+    )
+    owns_session = not reuse_source_session
+    last_error: Exception | None = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return session, action(session)
+        except HTTPException as error:
+            if not is_retryable_chatgpt_http_exception(error):
+                if owns_session:
+                    close_session(session)
+                raise
+            last_error = error
+        except Exception as error:
+            if not is_retryable_network_error(error):
+                if owns_session:
+                    close_session(session)
+                raise
+            last_error = error
+        if attempt >= max_attempts:
+            break
+        if emit:
+            lowered_label = str(label or "").strip().lower()
+            failure_category = (
+                "promotion_update"
+                if "promotion" in lowered_label
+                else "taxes_update"
+                if "tax" in lowered_label
+                else "proxy_network"
+            )
+            emit(
+                "sync",
+                f"{label} 同一 sticky 出口请求失败，重建会话重试 {attempt + 1}/{max_attempts}："
+                f"{short_error(str(getattr(last_error, 'detail', last_error)), 240)}",
+                failure_category=failure_category,
+            )
+        if owns_session:
+            close_session(session)
+        cancellable_sleep(1)
+        session = build_chatgpt_session(req, proxy_override=proxy)
+        owns_session = True
+    if owns_session:
+        close_session(session)
+    if isinstance(last_error, HTTPException):
+        raise last_error
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError(f"{label} retry exhausted")
 
 
 def update_checkout_promotion(
@@ -2006,6 +2849,45 @@ def update_checkout_taxes(
     return result
 
 
+def stripe_update_tax_region(
+    stripe: Any,
+    cs_id: str,
+    stripe_pk: str,
+    billing: dict[str, str],
+) -> str:
+    response = stripe.post(
+        f"https://api.stripe.com/v1/payment_pages/{cs_id}/update_tax_region",
+        data={
+            "tax_region[country]": str(billing.get("country") or "US"),
+            "tax_region[postal_code]": str(billing.get("postal_code") or ""),
+            "key": stripe_pk,
+            "_stripe_version": STRIPE_VERSION_FULL,
+        },
+        timeout=DEFAULT_TIMEOUT,
+    )
+    if response.status_code == 404:
+        response = stripe.post(
+            f"https://api.stripe.com/v1/payment_pages/{cs_id}",
+            data={
+                "eid": "NA",
+                "tax_region[country]": str(billing.get("country") or "US"),
+                "tax_region[state]": str(billing.get("state") or ""),
+                "tax_region[postal_code]": str(billing.get("postal_code") or ""),
+                "tax_region[line1]": str(billing.get("line1") or ""),
+                "tax_region[city]": str(billing.get("city") or ""),
+                "key": stripe_pk,
+                "_stripe_version": STRIPE_VERSION_FULL,
+            },
+            timeout=DEFAULT_TIMEOUT,
+        )
+    if response.status_code >= 400:
+        raise HTTPException(
+            status_code=response.status_code,
+            detail=stripe_error_summary("stripe update_tax_region failed", response),
+        )
+    return f"http_{response.status_code}"
+
+
 def prepare_paypal_after_sync(
     chatgpt: Any,
     checkout: dict[str, Any],
@@ -2013,52 +2895,91 @@ def prepare_paypal_after_sync(
     provider_proxy: str = "",
     promotion_proxy: str = "",
     emit: Any | None = None,
-) -> tuple[dict[str, Any], str, dict[str, str]]:
+) -> tuple[dict[str, Any], str, dict[str, str], Any]:
     cs_id = checkout["cs_id"]
     pm_country = effective_payment_method_country(req)
-    billing = billing_for_country(pm_country)
+    billing = billing_for_request(req, pm_country)
+    trial_country = promotion_stage_country(req)
+    tax_billing = billing_for_request(req, trial_country)
     provider_proxy = normalize_proxy_url(provider_proxy or provider_stage_proxy(req))
     promotion_proxy = normalize_proxy_url(promotion_proxy or promotion_stage_proxy(req))
-    checkout["promotion_country"] = promotion_stage_country(req)
+    checkout["promotion_country"] = trial_country
     if emit:
         emit(
             "sync",
-            f"Step 3：右池={promotion_stage_country(req)}，同步 plus-1-month-free 与 {billing['country']} 税区。",
+            f"Step 3：Checkout 创建时不携带优惠；现在切换右池 {trial_country} 同步 plus-1-month-free 与试用税区。",
         )
-    promotion_chatgpt = build_chatgpt_session(
-        req,
-        proxy_override=promotion_proxy,
-        source_session=chatgpt,
-    )
-    update_checkout_promotion(promotion_chatgpt, cs_id, checkout, emit=emit)
-    update_checkout_taxes(promotion_chatgpt, cs_id, checkout, billing, emit=emit)
+    promotion_chatgpt = None
+    try:
+        promotion_chatgpt, _promotion_result = run_checkout_action_with_sticky_retry(
+            req,
+            chatgpt,
+            promotion_proxy,
+            lambda session: update_checkout_promotion(session, cs_id, checkout, emit=emit),
+            label="Promotion update",
+            emit=emit,
+        )
+        promotion_chatgpt, _tax_result = run_checkout_action_with_sticky_retry(
+            req,
+            promotion_chatgpt,
+            promotion_proxy,
+            lambda session: update_checkout_taxes(session, cs_id, checkout, tax_billing, emit=emit),
+            label="Taxes update",
+            emit=emit,
+            reuse_source_session=True,
+        )
+    finally:
+        close_session(promotion_chatgpt)
     stripe = build_stripe_session(req, proxy_override=provider_proxy)
-    if emit:
-        emit("stripe_init", "Step 4：使用左池 provider 出口执行 Stripe init。")
-    init_payload = stripe_init(
-        cs_id,
-        req,
-        proxy_override=provider_proxy,
-        checkout=checkout,
-        stripe_session=stripe,
-    )
-    hosted_url = str(init_payload.get("stripe_hosted_url") or "").strip()
-    if not hosted_url:
-        hosted_url = stripe_checkout_long_url(
+    try:
+        if emit:
+            emit("stripe_init", "Step 4：优惠与税区同步后，使用 Provider 出口执行 Stripe init。")
+        init_payload = stripe_init(
             cs_id,
-            str(checkout.get("billing_country") or "US"),
-            str(checkout.get("processor_entity") or ""),
+            req,
+            proxy_override=provider_proxy,
+            checkout=checkout,
+            stripe_session=stripe,
         )
-        init_payload["stripe_hosted_url"] = hosted_url
-    if emit:
-        amount, amount_source = stripe_amount_info(init_payload)
-        emit(
-            "stripe_amount",
-            f"Stripe 金额：amount={amount or 'unknown'} source={amount_source}。",
-            stripe_amount=amount,
-            stripe_amount_source=amount_source,
+        hosted_url = str(init_payload.get("stripe_hosted_url") or "").strip()
+        if not hosted_url:
+            hosted_url = stripe_checkout_long_url(
+                cs_id,
+                str(checkout.get("billing_country") or "US"),
+                str(checkout.get("processor_entity") or ""),
+            )
+            init_payload["stripe_hosted_url"] = hosted_url
+        tax_refresh_status = stripe_update_tax_region(
+            stripe,
+            cs_id,
+            stripe_key_for_request(req, checkout),
+            tax_billing,
         )
-    return init_payload, hosted_url, billing
+        final_payload = stripe_init(
+            cs_id,
+            req,
+            proxy_override=provider_proxy,
+            checkout=checkout,
+            stripe_session=stripe,
+        )
+        if not str(final_payload.get("stripe_hosted_url") or "").strip():
+            final_payload["stripe_hosted_url"] = hosted_url
+        final_payload["_stripe_tax_refresh_status"] = tax_refresh_status
+        final_payload["_stripe_reinit_performed"] = True
+        init_payload = final_payload
+        hosted_url = str(init_payload.get("stripe_hosted_url") or hosted_url).strip()
+        if emit:
+            amount, amount_source = stripe_amount_info(init_payload)
+            emit(
+                "stripe_amount",
+                f"Stripe 金额：amount={amount or 'unknown'} source={amount_source}。",
+                stripe_amount=amount,
+                stripe_amount_source=amount_source,
+            )
+        return init_payload, hosted_url, billing, stripe
+    except Exception:
+        close_session(stripe)
+        raise
 
 
 def stripe_create_payment_method(
@@ -2067,7 +2988,9 @@ def stripe_create_payment_method(
     stripe_pk: str,
     billing: dict[str, str],
     ctx: dict[str, Any],
+    protocol: str = "standalone",
 ) -> str:
+    protocol_name = str(protocol or "standalone").strip().lower()
     runtime_version = str(ctx.get("runtime_version") or DEFAULT_STRIPE_RUNTIME_VERSION)
     body = {
         "billing_details[name]": billing.get("name") or "John Doe",
@@ -2079,6 +3002,9 @@ def stripe_create_payment_method(
         "billing_details[address][postal_code]": billing.get("postal_code") or "90026",
         "billing_details[address][state]": billing.get("state") or "CA",
         "type": "paypal",
+        "guid": str(ctx.get("guid") or ""),
+        "muid": str(ctx.get("muid") or ""),
+        "sid": str(ctx.get("sid") or ""),
         "payment_user_agent": f"stripe.js/{runtime_version}; stripe-js-v3/{runtime_version}; payment-element; deferred-intent",
         "referrer": "https://chatgpt.com",
         "time_on_page": str(random.randint(25000, 55000)),
@@ -2097,7 +3023,48 @@ def stripe_create_payment_method(
         "key": stripe_pk,
         "_stripe_version": STRIPE_VERSION_FULL,
     }
-    response = stripe.post("https://api.stripe.com/v1/payment_methods", data=body, timeout=DEFAULT_TIMEOUT)
+    if protocol_name != "enhanced":
+        body = {
+            "billing_details[name]": billing.get("name") or "John Doe",
+            "billing_details[email]": billing.get("email") or "buyer@example.com",
+            "billing_details[address][country]": billing.get("country") or "US",
+            "billing_details[address][line1]": billing.get("line1") or "3110 Sunset Boulevard",
+            "billing_details[address][city]": billing.get("city") or "Los Angeles",
+            "billing_details[address][postal_code]": billing.get("postal_code") or "90026",
+            "billing_details[address][state]": billing.get("state") or "CA",
+            "type": "paypal",
+            "payment_user_agent": f"stripe.js/{runtime_version}; stripe-js-v3/{runtime_version}; payment-element; deferred-intent",
+            "referrer": "https://chatgpt.com",
+            "time_on_page": str(random.randint(25000, 55000)),
+            "client_attribution_metadata[checkout_session_id]": cs_id,
+            "client_attribution_metadata[client_session_id]": ctx["stripe_js_id"],
+            "client_attribution_metadata[checkout_config_id]": ctx.get("config_id") or "",
+            "client_attribution_metadata[elements_session_id]": ctx["elements_session_id"],
+            "client_attribution_metadata[elements_session_config_id]": ctx["elements_session_config_id"],
+            "client_attribution_metadata[merchant_integration_source]": "elements",
+            "client_attribution_metadata[merchant_integration_subtype]": "payment-element",
+            "client_attribution_metadata[merchant_integration_version]": "2021",
+            "client_attribution_metadata[payment_intent_creation_flow]": "deferred",
+            "client_attribution_metadata[payment_method_selection_flow]": "automatic",
+            "key": stripe_pk,
+        }
+        if protocol_name in {"standalone", "chatgpt_confirm"}:
+            body.update(
+                {
+                    "client_attribution_metadata[merchant_integration_additional_elements][0]": "payment",
+                    "client_attribution_metadata[merchant_integration_additional_elements][1]": "address",
+                    "_stripe_version": STRIPE_VERSION_FULL,
+                }
+            )
+        request_headers = None
+    else:
+        request_headers = {"Referer": "https://chatgpt.com/"}
+    response = stripe.post(
+        "https://api.stripe.com/v1/payment_methods",
+        data=body,
+        headers=request_headers,
+        timeout=DEFAULT_TIMEOUT,
+    )
     if response.status_code >= 400:
         raise HTTPException(status_code=response.status_code, detail=f"stripe payment_methods failed: {response.text[:500]}")
     pm_id = str((response.json() or {}).get("id") or "")
@@ -2134,6 +3101,28 @@ def stripe_error_summary(prefix: str, response: Any) -> str:
     return f"{prefix}: {short_error(response.text, 500)}"
 
 
+def stripe_error_profile(response: Any) -> dict[str, str]:
+    try:
+        payload = response.json() or {}
+    except Exception:
+        payload = {}
+    error = payload.get("error") if isinstance(payload, dict) else {}
+    if not isinstance(error, dict):
+        error = {}
+    extra = error.get("extra_fields") if isinstance(error.get("extra_fields"), dict) else {}
+    return {
+        "http_status": str(getattr(response, "status_code", "") or ""),
+        "code": short_error(str(error.get("code") or ""), 160),
+        "decline_code": short_error(str(error.get("decline_code") or ""), 160),
+        "type": short_error(str(error.get("type") or ""), 160),
+        "message": short_error(str(error.get("message") or ""), 240),
+        "payment_method_type": short_error(str(extra.get("payment_method_type") or ""), 160),
+        "confirm_error_reason": short_error(str(extra.get("confirm_error_reason") or ""), 160),
+        "confirm_error_code": short_error(str(extra.get("confirm_error_code") or ""), 160),
+        "confirm_error_message": short_error(str(extra.get("confirm_error_message") or ""), 240),
+    }
+
+
 def stripe_confirm(
     stripe: Any,
     cs_id: str,
@@ -2144,19 +3133,174 @@ def stripe_confirm(
     checkout: dict[str, Any],
     req: LongLinkRequest,
     stripe_hosted_url: str,
+    billing: dict[str, str] | None = None,
+    emit: Any | None = None,
 ) -> dict[str, Any]:
-    return_url = stripe_confirm_return_url(cs_id, checkout, stripe_hosted_url)
+    confirm_protocol = str(getattr(req, "paypal_confirm_protocol", "standalone") or "standalone").strip().lower()
+    minimal_protocol = confirm_protocol == "minimal"
+    if str(pm_id or "").startswith("pm_") and confirm_protocol not in {"enhanced", "minimal"}:
+        return_url = stripe_confirm_return_url(
+            cs_id,
+            checkout,
+            stripe_hosted_url,
+            init_payload,
+        )
+        prep_profile = {
+            "protocol": "standalone",
+            "tax_refresh": str(init_payload.get("_stripe_tax_refresh_status") or "unknown"),
+            "reinit_performed": bool(init_payload.get("_stripe_reinit_performed")),
+            "pre_confirm": "skipped",
+            "checksum_changed": False,
+            "confirm_mode": "payment_method",
+            "expected_amount": "0" if req.require_zero_stripe_amount else str(ctx.get("checkout_amount") or "0"),
+            "expected_amount_on_bca_present": False,
+            "displayed_amount_fields": [],
+        }
+        body = {
+            "guid": uuid.uuid4().hex,
+            "muid": uuid.uuid4().hex,
+            "sid": uuid.uuid4().hex,
+            "payment_method": pm_id,
+            "init_checksum": str(init_payload.get("init_checksum") or ctx.get("init_checksum") or ""),
+            "version": str(ctx.get("runtime_version") or DEFAULT_STRIPE_RUNTIME_VERSION),
+            "expected_amount": prep_profile["expected_amount"],
+            "expected_payment_method_type": "paypal",
+            "return_url": return_url,
+            "elements_session_client[session_id]": ctx["elements_session_id"],
+            "elements_session_client[locale]": str(ctx.get("locale") or "en"),
+            "elements_session_client[referrer_host]": "chatgpt.com",
+            "elements_session_client[is_aggregation_expected]": "false",
+            "elements_session_client[elements_init_source]": "custom_checkout",
+            "elements_session_client[stripe_js_id]": ctx["stripe_js_id"],
+            "elements_session_client[client_betas][0]": "custom_checkout_server_updates_1",
+            "elements_session_client[client_betas][1]": "custom_checkout_manual_approval_1",
+            "elements_options_client[saved_payment_method][enable_save]": "never",
+            "elements_options_client[saved_payment_method][enable_redisplay]": "never",
+            "client_attribution_metadata[client_session_id]": ctx["stripe_js_id"],
+            "client_attribution_metadata[checkout_session_id]": cs_id,
+            "client_attribution_metadata[checkout_config_id]": ctx.get("config_id") or "",
+            "client_attribution_metadata[elements_session_id]": ctx["elements_session_id"],
+            "client_attribution_metadata[elements_session_config_id]": ctx["elements_session_config_id"],
+            "client_attribution_metadata[merchant_integration_source]": "checkout",
+            "client_attribution_metadata[merchant_integration_subtype]": "payment-element",
+            "client_attribution_metadata[merchant_integration_version]": "custom",
+            "client_attribution_metadata[payment_intent_creation_flow]": "deferred",
+            "client_attribution_metadata[payment_method_selection_flow]": "automatic",
+            "client_attribution_metadata[merchant_integration_additional_elements][0]": "payment",
+            "client_attribution_metadata[merchant_integration_additional_elements][1]": "address",
+            "consent[terms_of_service]": "accepted",
+            "key": stripe_pk,
+            "_stripe_version": STRIPE_VERSION_FULL,
+        }
+        request_profile = stripe_confirm_request_profile(body)
+        if emit:
+            emit("confirm", "Stripe standalone confirm 前置状态已刷新。", stripe_confirm_prep_profile=prep_profile)
+            emit("confirm", "Stripe confirm 脱敏请求结构已记录。", stripe_confirm_request_profile=request_profile)
+        response = stripe.post(
+            f"https://api.stripe.com/v1/payment_pages/{cs_id}/confirm",
+            data=body,
+            timeout=DEFAULT_TIMEOUT,
+        )
+        if response.status_code >= 400:
+            if emit:
+                emit("confirm", "Stripe confirm 返回错误。", stripe_confirm_error_profile=stripe_error_profile(response))
+            raise HTTPException(status_code=response.status_code, detail=stripe_error_summary("stripe confirm failed", response))
+        payload = response.json() or {}
+        if emit:
+            emit("confirm", "Stripe confirm 脱敏响应结构已记录。", stripe_confirm_response_profile=stripe_submission_profile(payload))
+        return payload
+
+    latest_payload = dict(init_payload)
+    billing = billing if isinstance(billing, dict) else {}
+    referrer_url = stripe_confirm_referrer_url(cs_id, checkout, stripe_hosted_url, latest_payload)
+    prep_profile: dict[str, Any] = {
+        "protocol": "minimal" if minimal_protocol else "enhanced",
+        "tax_refresh": "skipped",
+        "pre_confirm": "skipped",
+        "checksum_changed": False,
+        "confirm_mode": "payment_method" if str(pm_id or "").startswith("pm_") else "direct",
+    }
+    original_checksum = str(latest_payload.get("init_checksum") or ctx.get("init_checksum") or "")
+    if billing:
+        tax_body = {
+            "eid": "NA",
+            "tax_region[country]": str(billing.get("country") or "US"),
+            "tax_region[state]": str(billing.get("state") or ""),
+            "tax_region[postal_code]": str(billing.get("postal_code") or ""),
+            "tax_region[line1]": str(billing.get("line1") or ""),
+            "tax_region[city]": str(billing.get("city") or ""),
+            "key": stripe_pk,
+        }
+        if not minimal_protocol:
+            tax_body["_stripe_version"] = STRIPE_VERSION_FULL
+        tax_response = stripe.post(
+            f"https://api.stripe.com/v1/payment_pages/{cs_id}",
+            data=tax_body,
+            headers={"Referer": referrer_url or "https://pay.openai.com/"},
+            timeout=DEFAULT_TIMEOUT,
+        )
+        prep_profile["tax_refresh"] = f"http_{tax_response.status_code}"
+        if tax_response.status_code < 400:
+            try:
+                latest_payload = merge_stripe_checkout_payload(latest_payload, tax_response.json() or {})
+            except Exception:
+                pass
+    pre_confirm_body = {
+        "eid": "NA",
+        "payment_method_type": "paypal",
+        "key": stripe_pk,
+    }
+    if not minimal_protocol:
+        pre_confirm_body["_stripe_version"] = STRIPE_VERSION_FULL
+    pre_confirm_response = stripe.post(
+        f"https://api.stripe.com/v1/payment_pages/{cs_id}/pre_confirm",
+        data=pre_confirm_body,
+        headers={"Referer": referrer_url or "https://pay.openai.com/"},
+        timeout=DEFAULT_TIMEOUT,
+    )
+    prep_profile["pre_confirm"] = f"http_{pre_confirm_response.status_code}"
+    if pre_confirm_response.status_code < 400:
+        try:
+            latest_payload = merge_stripe_checkout_payload(latest_payload, pre_confirm_response.json() or {})
+        except Exception:
+            pass
+
+    latest_checksum = str(latest_payload.get("init_checksum") or original_checksum)
+    fallback_amount = str(ctx.get("checkout_amount") or expected_amount(latest_payload) or "0")
+    expected_amount_value, expected_amount_on_bca = stripe_confirm_expected_amounts(latest_payload, fallback_amount)
+    displayed_amounts = stripe_display_amounts(latest_payload)
+    if minimal_protocol and expected_amount_value == "0" and not expected_amount_on_bca:
+        future_subtotal, has_future_subtotal = _stripe_int(displayed_amounts.get("subtotal"))
+        if has_future_subtotal and future_subtotal > 0:
+            expected_amount_on_bca = str(future_subtotal)
+    ctx["init_checksum"] = latest_checksum
+    ctx["checkout_amount"] = expected_amount_value
+    prep_profile["checksum_changed"] = bool(original_checksum and latest_checksum and original_checksum != latest_checksum)
+    prep_profile["expected_amount"] = expected_amount_value
+    prep_profile["expected_amount_on_bca_present"] = bool(expected_amount_on_bca)
+    prep_profile["displayed_amount_fields"] = sorted(displayed_amounts)
+    if emit:
+        emit(
+            "confirm",
+            "Stripe confirm 前置状态已刷新。",
+            stripe_confirm_prep_profile=prep_profile,
+        )
+
+    return_url = stripe_confirm_return_url(cs_id, checkout, stripe_hosted_url, latest_payload)
+    referrer_url = stripe_confirm_referrer_url(cs_id, checkout, stripe_hosted_url, latest_payload)
     runtime_version = str(ctx.get("runtime_version") or DEFAULT_STRIPE_RUNTIME_VERSION)
     body = {
-        "guid": uuid.uuid4().hex,
-        "muid": uuid.uuid4().hex,
-        "sid": uuid.uuid4().hex,
+        "eid": "NA",
+        "guid": str(ctx.get("guid") or uuid.uuid4().hex),
+        "muid": str(ctx.get("muid") or uuid.uuid4().hex),
+        "sid": str(ctx.get("sid") or uuid.uuid4().hex),
         "payment_method": pm_id,
-        "init_checksum": str(init_payload.get("init_checksum") or ctx.get("init_checksum") or ""),
+        "init_checksum": latest_checksum,
         "version": runtime_version,
-        "expected_amount": str(ctx.get("checkout_amount") or expected_amount(init_payload)),
+        "expected_amount": expected_amount_value,
         "expected_payment_method_type": "paypal",
         "return_url": return_url,
+        "referrer": referrer_url,
         "elements_session_client[session_id]": ctx["elements_session_id"],
         "elements_session_client[locale]": str(ctx.get("locale") or "en"),
         "elements_session_client[referrer_host]": "chatgpt.com",
@@ -2183,10 +3327,73 @@ def stripe_confirm(
         "key": stripe_pk,
         "_stripe_version": STRIPE_VERSION_FULL,
     }
-    response = stripe.post(f"https://api.stripe.com/v1/payment_pages/{cs_id}/confirm", data=body, timeout=DEFAULT_TIMEOUT)
+    if minimal_protocol:
+        body = {
+            "eid": "NA",
+            "key": stripe_pk,
+            "init_checksum": latest_checksum,
+            "expected_amount": expected_amount_value,
+            "expected_payment_method_type": "paypal",
+            "return_url": return_url,
+            "referrer": referrer_url,
+            "consent[terms_of_service]": "accepted",
+        }
+    if not str(pm_id or "").startswith("pm_"):
+        body.pop("payment_method", None)
+        direct_payment_data = {
+            "payment_method_data[type]": "paypal",
+            "payment_method_data[billing_details][email]": str(billing.get("email") or ""),
+            "payment_method_data[billing_details][address][country]": str(billing.get("country") or "US"),
+            "payment_method_data[billing_details][address][postal_code]": str(billing.get("postal_code") or ""),
+            "payment_method_data[billing_details][address][state]": str(billing.get("state") or ""),
+            "payment_method_data[billing_details][address][city]": str(billing.get("city") or ""),
+            "payment_method_data[billing_details][address][line1]": str(billing.get("line1") or ""),
+            "payment_method_data[billing_details][address][line2]": str(billing.get("line2") or ""),
+        }
+        if not minimal_protocol:
+            direct_payment_data.update({
+                "payment_method_data[billing_details][name]": str(billing.get("name") or ""),
+                "payment_method_data[billing_details][phone]": str(billing.get("phone") or ""),
+            })
+        body.update(direct_payment_data)
+    elif minimal_protocol:
+        body["payment_method"] = pm_id
+    if expected_amount_on_bca:
+        body["expected_amount_on_bca"] = expected_amount_on_bca
+    displayed_keys = (
+        "subtotal",
+        "total_exclusive_tax",
+        "total_inclusive_tax",
+        "total_discount_amount",
+        "shipping_rate_amount",
+    )
+    for key in displayed_keys if minimal_protocol else displayed_amounts:
+        body[f"last_displayed_line_item_group_details[{key}]"] = str(displayed_amounts.get(key) or "0")
+    request_profile = stripe_confirm_request_profile(body)
+    if emit:
+        emit(
+            "confirm",
+            "Stripe confirm 脱敏请求结构已记录。",
+            stripe_confirm_request_profile=request_profile,
+        )
+    response = stripe.post(
+        f"https://api.stripe.com/v1/payment_pages/{cs_id}/confirm",
+        data=body,
+        headers={"Referer": referrer_url or "https://pay.openai.com/"},
+        timeout=DEFAULT_TIMEOUT,
+    )
     if response.status_code >= 400:
+        if emit:
+            emit("confirm", "Stripe confirm 返回错误。", stripe_confirm_error_profile=stripe_error_profile(response))
         raise HTTPException(status_code=response.status_code, detail=stripe_error_summary("stripe confirm failed", response))
-    return response.json() or {}
+    payload = response.json() or {}
+    if emit:
+        emit(
+            "confirm",
+            "Stripe confirm 脱敏响应结构已记录。",
+            stripe_confirm_response_profile=stripe_submission_profile(payload),
+        )
+    return payload
 
 
 def is_external_url(value: str) -> bool:
@@ -2329,33 +3536,114 @@ def extract_redirect_to_url(payload: Any) -> str:
 
 
 def stripe_payload_diagnostics(payload: Any, ctx: dict[str, Any]) -> str:
-    if not isinstance(payload, dict):
-        return f"payload_type={type(payload).__name__}"
-    keys = ",".join(sorted(payload.keys())[:12])
-    urls = collect_urls(payload)
-    paypal_count = sum(1 for item in urls if is_paypal_url(item))
-    ba_count = sum(1 for item in urls if is_paypal_ba_approve_url(item))
-    ignored_count = sum(1 for item in urls if is_ignored_resource_url(item))
-    submission = find_submission_attempt(payload)
-    submission_state = str(submission.get("state") or "") if isinstance(submission, dict) else ""
-    submission_fields = submission_attempt_failure_fields(submission)
-    submission_reason = first_non_empty(
-        submission_fields,
-        "reason",
-        "failure_reason",
-        "decline_code",
-        "failure_code",
-        "code",
-    )
-    submission_code = first_non_empty(submission_fields, "code", "decline_code", "failure_code")
-    submission_message = first_non_empty(submission_fields, "message", "failure_message", "error")
+    profile = stripe_submission_profile(payload)
+    if profile.get("payload_type") != "dict":
+        return f"payload_type={profile.get('payload_type') or type(payload).__name__}"
     return (
-        f"keys=[{keys}], urls={len(urls)}, paypal_urls={paypal_count}, ba_approve_urls={ba_count}, "
-        f"ignored_resource_urls={ignored_count}, submission_attempt={bool(submission)}, submission_state={submission_state or '未知'}, "
-        f"submission_reason={submission_reason or '无'}, submission_code={submission_code or '无'}, "
-        f"submission_message={submission_message or '无'}, "
-        f"ctx_session={ctx.get('elements_session_id') or ''}"
+        f"keys=[{','.join(profile.get('top_level_keys') or [])}], urls={profile.get('url_count') or 0}, "
+        f"paypal_urls={profile.get('paypal_url_count') or 0}, ba_approve_urls={profile.get('ba_approve_url_count') or 0}, "
+        f"ignored_resource_urls={profile.get('ignored_resource_url_count') or 0}, "
+        f"submission_attempt={bool(profile.get('submission_present'))}, submission_state={profile.get('submission_state') or '未知'}, "
+        f"submission_reason={profile.get('submission_reason') or '无'}, submission_code={profile.get('submission_code') or '无'}, "
+        f"submission_message={profile.get('submission_message') or '无'}, "
+        f"ctx_session_present={bool(ctx.get('elements_session_id'))}"
     )
+
+
+def _sanitized_stripe_path(value: str) -> str:
+    path = str(value or "")
+    path = re.sub(r"cs_(?:live|test)_[^/?#]+", "{checkout_session}", path, flags=re.IGNORECASE)
+    path = re.sub(r"pm_[^/?#]+", "{payment_method}", path, flags=re.IGNORECASE)
+    return path[:180]
+
+
+def stripe_confirm_request_profile(body: Any) -> dict[str, Any]:
+    if not isinstance(body, dict):
+        return {"payload_type": type(body).__name__}
+    return_url = str(body.get("return_url") or "")
+    parsed = urlsplit(return_url) if return_url else None
+    displayed_prefix = "last_displayed_line_item_group_details["
+    return {
+        "payload_type": "dict",
+        "field_count": len(body),
+        "eid": "NA" if str(body.get("eid") or "") == "NA" else "other",
+        "payment_method_present": str(body.get("payment_method") or "").startswith("pm_"),
+        "payment_method_data_present": str(body.get("payment_method_data[type]") or "") == "paypal",
+        "confirm_mode": (
+            "payment_method"
+            if str(body.get("payment_method") or "").startswith("pm_")
+            else "direct"
+            if str(body.get("payment_method_data[type]") or "") == "paypal"
+            else "unknown"
+        ),
+        "init_checksum_present": bool(str(body.get("init_checksum") or "")),
+        "expected_payment_method_type": str(body.get("expected_payment_method_type") or ""),
+        "expected_amount": str(body.get("expected_amount") or ""),
+        "expected_amount_on_bca_present": bool(str(body.get("expected_amount_on_bca") or "")),
+        "displayed_amount_fields": sorted(
+            key[len(displayed_prefix) : -1]
+            for key in body
+            if str(key).startswith(displayed_prefix) and str(key).endswith("]")
+        ),
+        "return_url_host": str(parsed.netloc if parsed else "").lower(),
+        "return_url_path": _sanitized_stripe_path(str(parsed.path if parsed else "")),
+        "return_url_query_keys": sorted({key for key, _value in parse_qsl(parsed.query, keep_blank_values=True)}) if parsed else [],
+        "referrer_present": bool(str(body.get("referrer") or "")),
+        "device_ids_present": all(bool(str(body.get(key) or "")) for key in ("guid", "muid", "sid")),
+        "elements_session_present": bool(str(body.get("elements_session_client[session_id]") or "")),
+        "checkout_session_attribution_present": bool(
+            str(body.get("client_attribution_metadata[checkout_session_id]") or "")
+        ),
+        "checkout_config_attribution_present": bool(
+            str(body.get("client_attribution_metadata[checkout_config_id]") or "")
+        ),
+        "merchant_integration_source": str(body.get("client_attribution_metadata[merchant_integration_source]") or ""),
+        "merchant_integration_subtype": str(body.get("client_attribution_metadata[merchant_integration_subtype]") or ""),
+    }
+
+
+def stripe_submission_profile(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {"payload_type": type(payload).__name__}
+    urls = collect_urls(payload)
+    submission = find_submission_attempt(payload)
+    fields = submission_attempt_failure_fields(submission)
+    safe_checkout_fields: dict[str, Any] = {}
+    for key in (
+        "approval_method",
+        "automatic_payment_method_types",
+        "billing_address_collection",
+        "checkout_provider",
+        "mode",
+        "payment_method_collection",
+        "payment_method_types",
+        "payment_status",
+        "requires_manual_approval",
+        "status",
+        "submit_type",
+    ):
+        value = payload.get(key)
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            safe_checkout_fields[key] = value
+        elif isinstance(value, list):
+            safe_checkout_fields[key] = [str(item)[:80] for item in value[:20] if isinstance(item, (str, int, float, bool))]
+    return {
+        "payload_type": "dict",
+        "top_level_keys": sorted(str(key) for key in payload.keys())[:20],
+        "url_count": len(urls),
+        "url_hosts": sorted({str(urlsplit(item).netloc or "").lower() for item in urls if is_external_url(item)})[:12],
+        "paypal_url_count": sum(1 for item in urls if is_paypal_url(item)),
+        "ba_approve_url_count": sum(1 for item in urls if is_paypal_ba_approve_url(item)),
+        "ignored_resource_url_count": sum(1 for item in urls if is_ignored_resource_url(item)),
+        "redirect_present": bool(extract_redirect_to_url(payload)),
+        "submission_present": bool(submission),
+        "submission_state": str(submission.get("state") or "") if isinstance(submission, dict) else "",
+        "submission_reason": first_non_empty(fields, "reason", "failure_reason", "decline_code", "failure_code", "code"),
+        "submission_code": first_non_empty(fields, "code", "decline_code", "failure_code"),
+        "submission_message": first_non_empty(fields, "message", "failure_message", "error"),
+        "submission_error_details": submission_attempt_error_details(submission),
+        "checkout_fields": safe_checkout_fields,
+    }
 
 
 def first_non_empty(values: dict[str, str], *keys: str) -> str:
@@ -2406,6 +3694,32 @@ def submission_attempt_failure_fields(submission: Any) -> dict[str, str]:
     if isinstance(submission, dict):
         walk(submission)
     return found
+
+
+def submission_attempt_error_details(submission: Any) -> list[dict[str, str]]:
+    markers = ("error", "reason", "code", "message", "state", "status", "type")
+    details: list[dict[str, str]] = []
+
+    def walk(value: Any, path: str = "submission_attempt", depth: int = 0) -> None:
+        if len(details) >= 24 or depth > 8:
+            return
+        if isinstance(value, dict):
+            for key, item in value.items():
+                key_text = str(key or "")
+                next_path = f"{path}.{key_text}"
+                lowered = key_text.lower()
+                if any(marker in lowered for marker in markers) and isinstance(item, (str, int, float, bool)):
+                    text = short_error(str(item), 240)
+                    if text:
+                        details.append({"path": next_path[:240], "value": text})
+                walk(item, next_path, depth + 1)
+        elif isinstance(value, list):
+            for index, item in enumerate(value[:20]):
+                walk(item, f"{path}[{index}]", depth + 1)
+
+    if isinstance(submission, dict):
+        walk(submission)
+    return details
 
 
 def submission_attempt_summary(submission: dict[str, Any]) -> str:
@@ -2482,11 +3796,32 @@ def stripe_payment_page_redirect_url(
     if emit:
         emit("redirect", "confirm 未返回跳转，复用 Stripe session 上下文轮询 payment page。")
     poll_count = 0
+    failed_grace = 3
+    failed_state_count = 0
+    network_error_count = 0
     while time.time() < deadline:
         poll_count += 1
         if emit:
             emit("redirect", f"等待 PayPal BA 链...第 {poll_count} 次。")
-        response = stripe.get(f"https://api.stripe.com/v1/payment_pages/{cs_id}", params=params, timeout=DEFAULT_TIMEOUT)
+        try:
+            response = stripe.get(
+                f"https://api.stripe.com/v1/payment_pages/{cs_id}",
+                params=params,
+                timeout=DEFAULT_TIMEOUT,
+            )
+        except Exception as exc:
+            if not is_retryable_network_error(exc):
+                raise
+            network_error_count += 1
+            last_err = short_error(str(exc), 300)
+            if emit:
+                emit(
+                    "redirect",
+                    f"Stripe poll network error {network_error_count}; retrying the same sticky session.",
+                    stripe_poll_network_errors=network_error_count,
+                )
+            cancellable_sleep(1)
+            continue
         if response.status_code == 200:
             payload = response.json() or {}
             redirect_url = extract_redirect_to_url(payload)
@@ -2498,9 +3833,28 @@ def stripe_payment_page_redirect_url(
             if submission.get("state") == "requires_approval":
                 raise StripeRequiresApproval("payment page requires ChatGPT approval")
             if submission.get("state") == "failed":
+                failed_state_count += 1
+                if failed_state_count <= failed_grace:
+                    if emit:
+                        emit(
+                            "redirect",
+                            f"Stripe submission failed on sync poll {failed_state_count}/{failed_grace}; waiting for provider state propagation.",
+                        )
+                    cancellable_sleep(2)
+                    continue
                 last_err = stripe_payload_diagnostics(payload, ctx)
+                submission_profile = stripe_submission_profile(payload)
                 if emit:
-                    emit("redirect", f"Stripe submission 已失败：{submission_attempt_summary(submission)}。")
+                    emit(
+                        "redirect",
+                        f"Stripe submission 已失败：{submission_attempt_summary(submission)}。",
+                        stripe_submission_profile=submission_profile,
+                        failure_category=(
+                            "generic_decline"
+                            if str(submission_profile.get("submission_reason") or "").lower() == "generic_decline"
+                            else "stripe_submission"
+                        ),
+                    )
                 raise HTTPException(status_code=502, detail=f"stripe submission failed: {last_err}")
             last_err = stripe_payload_diagnostics(payload, ctx)
             if emit and (poll_count == 1 or poll_count % 5 == 0):
@@ -2515,7 +3869,15 @@ def stripe_payment_page_redirect_url(
     raise HTTPException(status_code=504, detail=f"redirect url resolution timeout: {last_err}")
 
 
-def chatgpt_approve(chatgpt: Any, cs_id: str, checkout: dict[str, Any], timeout_seconds: float = CHATGPT_TIMEOUT) -> None:
+def post_approve_poll_timeout(req: Any) -> float:
+    try:
+        value = int(getattr(req, "post_approve_poll_timeout_seconds", 90) or 90)
+    except Exception:
+        value = 90
+    return float(max(30, min(180, value)))
+
+
+def chatgpt_approve(chatgpt: Any, cs_id: str, checkout: dict[str, Any], timeout_seconds: float = CHATGPT_TIMEOUT) -> str:
     country = checkout["billing_country"]
     processor_entity = processor_entity_for_country(country, checkout.get("processor_entity", ""))
     try:
@@ -2531,13 +3893,14 @@ def chatgpt_approve(chatgpt: Any, cs_id: str, checkout: dict[str, Any], timeout_
         )
     except Exception:
         pass
+    payments_path = "/backend-api/payments/checkout/approve"
     response = chatgpt.post(
         "https://chatgpt.com/backend-api/payments/checkout/approve",
         json={"checkout_session_id": cs_id, "processor_entity": processor_entity},
         headers={
             "Referer": f"https://chatgpt.com/checkout/{processor_entity}/{cs_id}",
-            "x-openai-target-path": "/backend-api/payments/checkout/approve",
-            "x-openai-target-route": "/backend-api/payments/checkout/approve",
+            "x-openai-target-path": payments_path,
+            "x-openai-target-route": payments_path,
         },
         timeout=timeout_seconds,
     )
@@ -2552,6 +3915,274 @@ def chatgpt_approve(chatgpt: Any, cs_id: str, checkout: dict[str, Any], timeout_
         raise ChatgptApproveBlocked(f"chatgpt approve retryable result: {normalized_result!r}")
     if result != "approved":
         raise HTTPException(status_code=502, detail=f"chatgpt approve unexpected result: {result!r}")
+    return "payments_checkout"
+
+
+def chatgpt_approve_via_playwright(
+    req: LongLinkRequest,
+    chatgpt: Any,
+    cs_id: str,
+    checkout: dict[str, Any],
+    *,
+    timeout_seconds: float = 60,
+) -> str:
+    """Run checkout approval inside a real chatgpt.com browser context.
+
+    This is a transport fallback for application-level ``blocked`` results. It
+    keeps the already confirmed Stripe session intact and only replaces the
+    ChatGPT approval request that curl-based clients could not complete.
+    """
+    if not APPROVE_PLAYWRIGHT_SEMAPHORE.acquire(timeout=max(5.0, float(timeout_seconds or 60))):
+        raise HTTPException(status_code=429, detail="playwright approve concurrency limit reached")
+    try:
+        try:
+            from patchright.sync_api import TimeoutError as PlaywrightTimeoutError
+            from patchright.sync_api import sync_playwright
+        except Exception:
+            from playwright.sync_api import TimeoutError as PlaywrightTimeoutError  # type: ignore
+            from playwright.sync_api import sync_playwright  # type: ignore
+
+        processor_entity = processor_entity_for_country(
+            str(checkout.get("billing_country") or "US"),
+            str(checkout.get("processor_entity") or ""),
+        )
+        payments_path = "/backend-api/payments/checkout/approve"
+        session_headers = dict(getattr(chatgpt, "headers", {}) or {})
+        device_id = str(session_headers.get("oai-device-id") or req.device_id or uuid.uuid4())
+        request_headers = {
+            "Accept": "*/*",
+            "Authorization": f"Bearer {normalize_access_token(req.access_token)}",
+            "Content-Type": "application/json",
+            "oai-device-id": device_id,
+            "oai-language": "en-US",
+            "x-openai-target-path": payments_path,
+            "x-openai-target-route": payments_path,
+        }
+        timeout_ms = int(max(15.0, min(90.0, float(timeout_seconds or 60))) * 1000)
+        proxy = _playwright_proxy_config(chatgpt)
+        result: dict[str, Any] = {}
+        with sync_playwright() as runtime:
+            browser = runtime.chromium.launch(headless=True, proxy=proxy)
+            try:
+                context = browser.new_context(
+                    user_agent=str(session_headers.get("User-Agent") or req.user_agent or DEFAULT_USER_AGENT),
+                    locale="en-US",
+                    ignore_https_errors=True,
+                )
+                cookies = _playwright_cookies(chatgpt)
+                if cookies:
+                    context.add_cookies(cookies)
+                if not any(str(item.get("name") or "") == "oai-did" for item in cookies):
+                    context.add_cookies(
+                        [{
+                            "name": "oai-did",
+                            "value": device_id,
+                            "domain": "chatgpt.com",
+                            "path": "/",
+                            "secure": True,
+                            "httpOnly": False,
+                        }]
+                    )
+                page = context.new_page()
+                try:
+                    page.goto(
+                        f"https://chatgpt.com/checkout/{processor_entity}/{cs_id}",
+                        wait_until="domcontentloaded",
+                        timeout=timeout_ms,
+                    )
+                except PlaywrightTimeoutError:
+                    pass
+                result = page.evaluate(
+                    """
+                    async ({headers, body}) => {
+                      try {
+                        await fetch("/backend-api/sentinel/ping", {
+                          method: "POST",
+                          headers: {
+                            ...headers,
+                            "x-openai-target-path": "/backend-api/sentinel/ping",
+                            "x-openai-target-route": "/backend-api/sentinel/ping",
+                          },
+                          credentials: "include",
+                          body: "{}",
+                        });
+                      } catch (_) {}
+                      const response = await fetch("/backend-api/payments/checkout/approve", {
+                        method: "POST",
+                        headers,
+                        credentials: "include",
+                        body: JSON.stringify(body),
+                      });
+                      return {
+                        status: response.status,
+                        contentType: response.headers.get("content-type") || "",
+                        text: await response.text(),
+                      };
+                    }
+                    """,
+                    {
+                        "headers": request_headers,
+                        "body": {"checkout_session_id": cs_id, "processor_entity": processor_entity},
+                    },
+                )
+            finally:
+                browser.close()
+
+        status_code = int(result.get("status") or 0)
+        response_text = str(result.get("text") or "")
+        if status_code <= 0 or status_code >= 400:
+            compact = re.sub(r"\s+", " ", response_text).strip()[:500]
+            raise HTTPException(
+                status_code=status_code or 502,
+                detail=(
+                    f"playwright approve failed: status={status_code or 'unknown'}; "
+                    f"content_type={result.get('contentType') or 'unknown'}; body={compact}"
+                ),
+            )
+        try:
+            payload = json.loads(response_text or "{}")
+        except Exception as error:
+            raise HTTPException(status_code=502, detail="playwright approve response was not JSON") from error
+        normalized_result = str((payload or {}).get("result") or "").strip().lower()
+        if normalized_result in APPROVE_BURST_RESULTS:
+            raise ChatgptApproveBlocked(f"playwright approve retryable result: {normalized_result!r}")
+        if normalized_result not in {"approved", "success", "ok"}:
+            raise HTTPException(status_code=502, detail=f"playwright approve unexpected result: {normalized_result!r}")
+        return "payments_checkout_playwright"
+    finally:
+        APPROVE_PLAYWRIGHT_SEMAPHORE.release()
+
+
+def chatgpt_checkout_confirm(
+    chatgpt: Any,
+    cs_id: str,
+    checkout: dict[str, Any],
+    emit: Any | None = None,
+) -> dict[str, Any]:
+    path = "/backend-api/payments/checkout/confirm"
+    sentinel_headers: dict[str, str] = {}
+    if build_sentinel_headers_bundle is not None:
+        try:
+            device_id = str(getattr(chatgpt, "headers", {}).get("oai-device-id") or "").strip()
+            if device_id:
+                bundle = build_sentinel_headers_bundle(
+                    chatgpt,
+                    device_id,
+                    "checkout_session_approval",
+                    user_agent=str(getattr(chatgpt, "headers", {}).get("User-Agent") or DEFAULT_USER_AGENT),
+                    sec_ch_ua=str(getattr(chatgpt, "headers", {}).get("sec-ch-ua") or ""),
+                )
+                sentinel_headers = {
+                    key: str(value)
+                    for key, value in bundle.items()
+                    if key.startswith("openai-sentinel-") and value
+                }
+                oai_sc = str(bundle.get("oai-sc") or "")
+                if oai_sc:
+                    try:
+                        chatgpt.cookies.set("oai-sc", oai_sc, domain=".chatgpt.com")
+                    except Exception:
+                        pass
+        except Exception:
+            sentinel_headers = {}
+    processor_entity = processor_entity_for_country(
+        str(checkout.get("billing_country") or "US"),
+        str(checkout.get("processor_entity") or ""),
+    )
+    response = chatgpt.post(
+        "https://chatgpt.com" + path,
+        json={
+            "checkout_session_id": cs_id,
+            "selected_payment_method_type": "paypal",
+        },
+        headers={
+            "Referer": f"https://chatgpt.com/checkout/{processor_entity}/{cs_id}",
+            "x-openai-target-path": path,
+            "x-openai-target-route": path,
+            **sentinel_headers,
+        },
+        timeout=CHATGPT_TIMEOUT,
+    )
+    if response.status_code >= 400:
+        raise HTTPException(
+            status_code=response.status_code,
+            detail=http_error_detail("chatgpt checkout confirm failed", response),
+        )
+    try:
+        payload = response.json() or {}
+    except Exception:
+        payload = {}
+    status = str(payload.get("status") or "").strip().lower() if isinstance(payload, dict) else ""
+    profile = {
+        "http_status": str(response.status_code),
+        "status": status,
+        "type": str(payload.get("type") or "") if isinstance(payload, dict) else "",
+        "client_secret_present": bool(str(payload.get("client_secret") or "")) if isinstance(payload, dict) else False,
+        "confirm_return_url_host": (
+            str(urlsplit(str(payload.get("confirm_return_url") or "")).netloc or "").lower()
+            if isinstance(payload, dict)
+            else ""
+        ),
+        "sentinel_headers_present": bool(sentinel_headers),
+    }
+    if emit:
+        emit(
+            "approve",
+            "ChatGPT checkout confirm returned a sanitized intent profile.",
+            chatgpt_confirm_profile=profile,
+            chatgpt_approval_endpoint="payments_checkout_confirm",
+        )
+    if status in {"blocked", "expired", "error"}:
+        raise HTTPException(status_code=502, detail=f"chatgpt checkout confirm status: {status}")
+    if not isinstance(payload, dict) or not str(payload.get("client_secret") or "").strip():
+        raise HTTPException(status_code=502, detail="chatgpt checkout confirm missing client_secret")
+    return payload
+
+
+def stripe_confirm_intent(
+    stripe: Any,
+    pm_id: str,
+    stripe_pk: str,
+    confirm_payload: dict[str, Any],
+    emit: Any | None = None,
+) -> dict[str, Any]:
+    client_secret = str(confirm_payload.get("client_secret") or "").strip()
+    intent_type = str(confirm_payload.get("type") or "").strip().lower()
+    if intent_type == "setup_intent" or client_secret.startswith("seti_"):
+        intent_kind = "setup_intents"
+    elif intent_type == "payment_intent" or client_secret.startswith("pi_"):
+        intent_kind = "payment_intents"
+    else:
+        raise HTTPException(status_code=502, detail=f"unsupported checkout confirm intent type: {intent_type or 'unknown'}")
+    intent_id = client_secret.split("_secret_", 1)[0]
+    if not intent_id or not str(pm_id or "").startswith("pm_"):
+        raise HTTPException(status_code=502, detail="checkout intent confirm missing intent or payment method")
+    return_url = str(confirm_payload.get("confirm_return_url") or "https://chatgpt.com/").strip()
+    body = {
+        "payment_method": pm_id,
+        "client_secret": client_secret,
+        "return_url": return_url,
+        "use_stripe_sdk": "true",
+        "key": stripe_pk,
+    }
+    response = stripe.post(
+        f"https://api.stripe.com/v1/{intent_kind}/{intent_id}/confirm",
+        data=body,
+        headers={"Referer": "https://chatgpt.com/"},
+        timeout=DEFAULT_TIMEOUT,
+    )
+    if response.status_code >= 400:
+        if emit:
+            emit("confirm", "Stripe intent confirm returned an error.", stripe_confirm_error_profile=stripe_error_profile(response))
+        raise HTTPException(status_code=response.status_code, detail=stripe_error_summary("stripe intent confirm failed", response))
+    payload = response.json() or {}
+    if emit:
+        emit(
+            "confirm",
+            "Stripe intent confirm returned a sanitized response profile.",
+            stripe_confirm_response_profile=stripe_submission_profile(payload),
+        )
+    return payload
 
 
 def chatgpt_approve_blocked_burst(
@@ -2559,37 +4190,69 @@ def chatgpt_approve_blocked_burst(
     cs_id: str,
     checkout: dict[str, Any],
     emit: Any | None = None,
+    source_session: Any | None = None,
 ) -> Any:
+    batch_concurrency = max(1, min(10, int(getattr(req, "batch_concurrency", 1) or 1)))
     attempts = APPROVE_BLOCKED_BURST_ATTEMPTS
-    timeout_seconds = APPROVE_BLOCKED_BURST_TIMEOUT_SECONDS
+    workers = max(1, min(attempts, APPROVE_BLOCKED_BURST_ATTEMPTS // batch_concurrency))
+    request_timeout = APPROVE_BLOCKED_BURST_TIMEOUT_SECONDS
+    burst_rounds = (attempts + workers - 1) // workers
+    burst_timeout = max(request_timeout, burst_rounds * request_timeout + 1.0)
     if emit:
-        emit("approve", f"approve 返回 blocked/exception，启动并发复投：{attempts} 次 / {timeout_seconds:g} 秒。")
-    acquired = 0
-    for _ in range(attempts):
-        ensure_not_cancelled()
-        if not APPROVE_BURST_SEMAPHORE.acquire(timeout=timeout_seconds):
-            break
-        acquired += 1
-    if acquired <= 0:
-        raise HTTPException(status_code=429, detail="rate_limited: approve burst global limit reached")
-    executor = ThreadPoolExecutor(max_workers=acquired)
+        emit(
+            "approve",
+            f"approve 返回 blocked/exception，启动公平并发复投：当前任务累计 {attempts} 次 / "
+            f"并行 {workers} / 全局 {APPROVE_BLOCKED_BURST_ATTEMPTS} 槽 / {burst_timeout:g} 秒。",
+        )
+    executor = ThreadPoolExecutor(max_workers=workers)
     futures = []
     used_approve_bases: set[str] = set()
-    for _ in range(acquired):
+    winner_lock = threading.Lock()
+    winner_session: list[Any | None] = [None]
+
+    def approve_attempt(item: LongLinkRequest) -> Any | None:
+        if not APPROVE_BURST_SEMAPHORE.acquire(timeout=burst_timeout):
+            raise HTTPException(status_code=429, detail="rate_limited: approve burst global limit reached")
+        session = None
+        try:
+            with winner_lock:
+                if winner_session[0] is not None:
+                    return None
+            session = build_chatgpt_session(
+                item,
+                proxy_override=approve_stage_proxy(item),
+                source_session=source_session,
+            )
+            chatgpt_approve(session, cs_id, checkout, request_timeout)
+            with winner_lock:
+                if winner_session[0] is None:
+                    winner_session[0] = session
+                    return session
+            close_session(session)
+            return None
+        except Exception:
+            close_session(session)
+            raise
+        finally:
+            APPROVE_BURST_SEMAPHORE.release()
+
+    for _ in range(attempts):
         ensure_not_cancelled()
         attempt_req = request_with_rotated_approve_session(req, used_bases=used_approve_bases)
-        futures.append(executor.submit(lambda item=attempt_req: (chatgpt_approve(build_chatgpt_session(item), cs_id, checkout, timeout_seconds), item)[1]))
-    deadline = time.time() + timeout_seconds
+        futures.append(executor.submit(approve_attempt, attempt_req))
+    deadline = time.time() + burst_timeout
     last_error = "blocked/exception"
     try:
-        for future in as_completed(futures, timeout=timeout_seconds):
+        for future in as_completed(futures, timeout=burst_timeout):
             ensure_not_cancelled()
             try:
-                approved_req = future.result()
-                executor.shutdown(wait=False, cancel_futures=True)
+                approved_session = future.result()
+                if approved_session is None:
+                    continue
+                executor.shutdown(wait=True, cancel_futures=True)
                 if emit:
                     emit("approve", "blocked 并发复投命中 approved。")
-                return build_chatgpt_session(approved_req)
+                return approved_session
             except ChatgptApproveBlocked as exc:
                 last_error = str(exc)
             except HTTPException as exc:
@@ -2601,12 +4264,13 @@ def chatgpt_approve_blocked_burst(
     except TimeoutError:
         pass
     finally:
-        executor.shutdown(wait=False, cancel_futures=True)
-        for _ in range(acquired):
-            APPROVE_BURST_SEMAPHORE.release()
+        executor.shutdown(wait=True, cancel_futures=True)
     raise HTTPException(
         status_code=502,
-        detail=f"chatgpt approve blocked/exception burst failed: attempts={acquired}, timeout={timeout_seconds:g}s, last={short_error(last_error)}",
+        detail=(
+            "chatgpt approve blocked/exception burst failed: "
+            f"attempts={attempts}, workers={workers}, timeout={burst_timeout:g}s, last={short_error(last_error)}"
+        ),
     )
 
 
@@ -2615,6 +4279,7 @@ def chatgpt_approve_with_retry(
     cs_id: str,
     checkout: dict[str, Any],
     emit: Any | None = None,
+    source_session: Any | None = None,
 ) -> Any:
     last_error = ""
     verified_req: LongLinkRequest | None = None
@@ -2633,7 +4298,14 @@ def chatgpt_approve_with_retry(
             expected_country = "" if single_proxy_mode(attempt_req) else country
             if emit:
                 emit("approve", f"approve 出口检测 {attempt}/{max_attempts}：正在检测 {probe_label}。")
-            probe = probe_proxy(probe_label, approve_stage_proxy(attempt_req), expected_country, required=True, parent_proxy=chain_parent_proxy(attempt_req))
+            probe = probe_proxy(
+                probe_label,
+                approve_stage_proxy(attempt_req),
+                expected_country,
+                required=True,
+                parent_proxy=chain_parent_proxy(attempt_req),
+                required_ip_version=required_proxy_ip_version(attempt_req),
+            )
             if not probe.ok:
                 last_error = probe.error or f"{probe_label} 检测失败"
                 if emit:
@@ -2643,7 +4315,10 @@ def chatgpt_approve_with_retry(
                 if attempt < max_attempts:
                     cancellable_sleep(PROXY_EXIT_RETRY_DELAY_SECONDS)
                 continue
-            expected_ip = str(checkout.get("provider_proxy_ip") or checkout.get("checkout_proxy_ip") or "").strip()
+            if bool(getattr(req, "approve_same_as_checkout", False)):
+                expected_ip = str(checkout.get("checkout_proxy_ip") or "").strip()
+            else:
+                expected_ip = str(checkout.get("provider_proxy_ip") or checkout.get("checkout_proxy_ip") or "").strip()
             if bool(getattr(req, "strict_approve_same_proxy_ip", False)) and expected_ip and not proxy_ip_matches(expected_ip, probe.ip):
                 last_error = f"proxy_ip_mismatch: expected={expected_ip}, approve={probe.ip or 'unknown'}"
                 if emit:
@@ -2674,21 +4349,91 @@ def chatgpt_approve_with_retry(
                 )
         attempt_req = verified_req
         country = verified_country or country
+        chatgpt = None
+        owns_chatgpt = False
         try:
             if emit:
                 emit("approve", f"approve 提交重试 {attempt}/{max_attempts}：正在建立 ChatGPT 会话。")
-            chatgpt = build_chatgpt_session(attempt_req)
+            reuse_checkout_session = (
+                attempt == 1
+                and source_session is not None
+                and approve_stage_proxy(attempt_req) == checkout_stage_proxy(attempt_req)
+            )
+            chatgpt = (
+                source_session
+                if reuse_checkout_session
+                else build_chatgpt_session(
+                    attempt_req,
+                    proxy_override=approve_stage_proxy(attempt_req),
+                    source_session=source_session if attempt == 1 else None,
+                )
+            )
+            owns_chatgpt = not reuse_checkout_session
             if emit:
-                emit("approve", f"approve 提交重试 {attempt}/{max_attempts}：正在提交 ChatGPT approve。")
-            chatgpt_approve(chatgpt, cs_id, checkout)
+                emit(
+                    "approve",
+                    f"approve 提交重试 {attempt}/{max_attempts}：正在提交 ChatGPT approve。",
+                    approval_session_state_copied=bool(attempt == 1 and source_session is not None and not reuse_checkout_session),
+                )
+            approval_endpoint = chatgpt_approve(chatgpt, cs_id, checkout)
             if emit:
-                emit("approve", "ChatGPT approve 请求成功。")
+                emit(
+                    "approve",
+                    f"ChatGPT approve 请求成功：{approval_endpoint}。",
+                    chatgpt_approval_endpoint=approval_endpoint,
+                    approve_response="approved",
+                )
             return chatgpt
-        except ChatgptApproveBlocked:
+        except ChatgptApproveBlocked as blocked_error:
+            browser_error = ""
+            if bool(getattr(req, "enable_playwright_approve_fallback", False)):
+                if emit:
+                    emit(
+                        "approve",
+                        "HTTP approve returned blocked/exception; starting Playwright approve fallback.",
+                        playwright_approve_fallback_started=True,
+                    )
+                try:
+                    approval_endpoint = chatgpt_approve_via_playwright(
+                        attempt_req,
+                        chatgpt,
+                        cs_id,
+                        checkout,
+                    )
+                    if emit:
+                        emit(
+                            "approve",
+                            "Playwright approve fallback succeeded; continuing Stripe redirect polling.",
+                            chatgpt_approval_endpoint=approval_endpoint,
+                            approve_response="approved",
+                            playwright_approve_fallback_used=True,
+                        )
+                    return chatgpt
+                except Exception as browser_exc:
+                    browser_error = short_error(str(getattr(browser_exc, "detail", browser_exc)), 360)
+                    if emit:
+                        emit(
+                            "approve",
+                            f"Playwright approve fallback failed: {browser_error}",
+                            playwright_approve_fallback_error=browser_error,
+                        )
+            if owns_chatgpt:
+                close_session(chatgpt)
             if req.enable_approve_blocked_burst:
-                return chatgpt_approve_blocked_burst(req, cs_id, checkout, emit=emit)
-            raise HTTPException(status_code=502, detail="chatgpt approve retryable result: blocked/exception")
+                return chatgpt_approve_blocked_burst(
+                    req,
+                    cs_id,
+                    checkout,
+                    emit=emit,
+                    source_session=source_session,
+                )
+            detail = str(blocked_error)
+            if browser_error:
+                detail += f"; playwright fallback: {browser_error}"
+            raise HTTPException(status_code=502, detail=detail)
         except HTTPException as exc:
+            if owns_chatgpt:
+                close_session(chatgpt)
             if not (is_retryable_provider_http_exception(exc) or is_retryable_chatgpt_http_exception(exc)):
                 raise
             last_error = str(exc.detail or exc)
@@ -2701,6 +4446,8 @@ def chatgpt_approve_with_retry(
             if attempt < max_attempts:
                 cancellable_sleep(PROXY_EXIT_RETRY_DELAY_SECONDS)
         except Exception as exc:
+            if owns_chatgpt:
+                close_session(chatgpt)
             if not is_retryable_network_error(exc):
                 raise
             last_error = str(exc)
@@ -2740,24 +4487,56 @@ def redirect_url_after_confirm(
     if submission.get("state") == "requires_approval":
         if emit:
             emit("approve", f"Step 7 chatgpt_approve：Stripe 要求 requires_approval，正在使用 {approve_stage_country(req)} 代理提交 ChatGPT approve。")
-        chatgpt = chatgpt_approve_with_retry(req, cs_id, checkout, emit=emit)
-        if emit:
-            emit("approve", "Step 7 chatgpt_approve 已通过，继续轮询 PayPal BA approve 跳转。")
-        return stripe_payment_page_redirect_url(poll_session, cs_id, stripe_pk, req, ctx, timeout_seconds=45, emit=emit)
+        approval_session = chatgpt_approve_with_retry(req, cs_id, checkout, emit=emit, source_session=chatgpt)
+        try:
+            if emit:
+                emit("approve", "Step 7 chatgpt_approve 已通过，继续轮询 PayPal BA approve 跳转。")
+            return stripe_payment_page_redirect_url(
+                poll_session,
+                cs_id,
+                stripe_pk,
+                req,
+                ctx,
+                timeout_seconds=post_approve_poll_timeout(req),
+                emit=emit,
+            )
+        finally:
+            close_session(approval_session)
     if submission.get("state") == "failed":
         diagnostics = stripe_payload_diagnostics(confirm_payload, ctx)
+        submission_profile = stripe_submission_profile(confirm_payload)
         if emit:
-            emit("redirect", f"Stripe submission 已失败：{submission_attempt_summary(submission)}。")
+            emit(
+                "redirect",
+                f"Stripe submission 已失败：{submission_attempt_summary(submission)}。",
+                stripe_submission_profile=submission_profile,
+                failure_category=(
+                    "generic_decline"
+                    if str(submission_profile.get("submission_reason") or "").lower() == "generic_decline"
+                    else "stripe_submission"
+                ),
+            )
         raise HTTPException(status_code=502, detail=f"stripe submission failed: {diagnostics}")
     try:
         return stripe_payment_page_redirect_url(poll_session, cs_id, stripe_pk, req, ctx, timeout_seconds=30, emit=emit)
     except StripeRequiresApproval:
         if emit:
             emit("approve", "Step 7 chatgpt_approve：轮询 payment page 发现 requires_approval，正在提交 ChatGPT approve。")
-        chatgpt = chatgpt_approve_with_retry(req, cs_id, checkout, emit=emit)
-        if emit:
-            emit("approve", "Step 7 chatgpt_approve 已通过，继续轮询 PayPal BA approve 跳转。")
-        return stripe_payment_page_redirect_url(poll_session, cs_id, stripe_pk, req, ctx, timeout_seconds=45, emit=emit)
+        approval_session = chatgpt_approve_with_retry(req, cs_id, checkout, emit=emit, source_session=chatgpt)
+        try:
+            if emit:
+                emit("approve", "Step 7 chatgpt_approve 已通过，继续轮询 PayPal BA approve 跳转。")
+            return stripe_payment_page_redirect_url(
+                poll_session,
+                cs_id,
+                stripe_pk,
+                req,
+                ctx,
+                timeout_seconds=post_approve_poll_timeout(req),
+                emit=emit,
+            )
+        finally:
+            close_session(approval_session)
 
 
 def resolve_external_redirect(stripe: Any, redirect_url: str, preferred_hosts: tuple[str, ...] = (), max_hops: int = 5) -> str:
@@ -2788,6 +4567,284 @@ def resolve_external_redirect(stripe: Any, redirect_url: str, preferred_hosts: t
     return current
 
 
+def verify_right_session_exit(
+    session: Any,
+    *,
+    expected_ip: str,
+    expected_country: str,
+    label: str,
+    required_ip_version: int = 0,
+) -> ProxyProbeResult:
+    expected_ip = str(expected_ip or "").strip()
+    expected_country = str(expected_country or "").strip().upper()
+    if not expected_ip:
+        return ProxyProbeResult(ok=True, label=label, proxy="", error="没有前置右侧 IP，跳过一致性比较")
+    try:
+        ip, country_code, country = fetch_proxy_geo(session)
+    except Exception as exc:
+        return ProxyProbeResult(ok=False, label=label, proxy="", error=f"{label} 检测失败: {exc}")
+    result = ProxyProbeResult(
+        ok=True,
+        label=label,
+        proxy=str((getattr(session, "proxies", {}) or {}).get("https") or ""),
+        ip=ip,
+        country=country,
+        country_code=country_code,
+    )
+    if expected_country and country_code != expected_country:
+        result.ok = False
+        result.error = f"{label} 出口不是 {expected_country}: {country_code or '未知'} {ip or '未知'}"
+    if expected_ip and not proxy_ip_matches(expected_ip, ip):
+        result.ok = False
+        result.error = f"right_session_ip_mismatch: expected={expected_ip}, actual={ip or 'unknown'}"
+    if required_ip_version:
+        try:
+            actual_version = ipaddress.ip_address(str(ip or "").strip().strip("[]").split("%", 1)[0]).version
+        except ValueError:
+            actual_version = 0
+        if actual_version != required_ip_version:
+            result.ok = False
+            result.error = f"{label} 出口不是 IPv{required_ip_version}: {country_code or '未知'} {ip or '未知'}"
+    return result
+
+
+def verify_poll_session_exit(
+    req: LongLinkRequest,
+    session: Any,
+    *,
+    expected_ip: str,
+    expected_country: str,
+    label: str,
+    reuse_provider_session: bool,
+) -> ProxyProbeResult:
+    if reuse_provider_session:
+        return ProxyProbeResult(
+            ok=True,
+            label=label,
+            proxy=str((getattr(session, "proxies", {}) or {}).get("https") or ""),
+            ip=str(expected_ip or ""),
+            country_code=str(expected_country or "").upper(),
+        )
+    return verify_right_session_exit(
+        session,
+        expected_ip=expected_ip,
+        expected_country=expected_country,
+        label=label,
+        required_ip_version=required_proxy_ip_version(req),
+    )
+
+
+def _playwright_proxy_config(session: Any) -> dict[str, str] | None:
+    proxies = dict(getattr(session, "proxies", {}) or {})
+    proxy_url = str(proxies.get("https") or proxies.get("http") or "").strip()
+    if not proxy_url:
+        return None
+    parsed = urlsplit(proxy_url)
+    host = proxy_host_port(parsed.hostname or "", parsed.port)
+    if not host:
+        return None
+    config = {"server": f"{parsed.scheme or 'http'}://{host}"}
+    if parsed.username:
+        config["username"] = unquote(parsed.username)
+    if parsed.password:
+        config["password"] = unquote(parsed.password)
+    return config
+
+
+def _playwright_cookies(session: Any) -> list[dict[str, Any]]:
+    cookies: list[dict[str, Any]] = []
+    jar = getattr(getattr(session, "cookies", None), "jar", None)
+    for item in list(jar or []):
+        name = str(getattr(item, "name", "") or "")
+        domain = str(getattr(item, "domain", "") or "")
+        if not name or not domain:
+            continue
+        cookie: dict[str, Any] = {
+            "name": name,
+            "value": str(getattr(item, "value", "") or ""),
+            "domain": domain,
+            "path": str(getattr(item, "path", "/") or "/"),
+            "secure": bool(getattr(item, "secure", False)),
+            "httpOnly": bool(getattr(item, "has_nonstandard_attr", lambda _name: False)("HttpOnly")),
+        }
+        expires = getattr(item, "expires", None)
+        if isinstance(expires, (int, float)) and expires > 0:
+            cookie["expires"] = float(expires)
+        cookies.append(cookie)
+    return cookies
+
+
+def create_checkout_via_playwright(req: LongLinkRequest) -> dict[str, Any]:
+    """Create a plain Checkout in Chromium after an API-level HTML 403.
+
+    Promotion is intentionally absent here. The country-specific Promotion and
+    Taxes calls still run later through ``prepare_paypal_after_sync``.
+    """
+    try:
+        from patchright.sync_api import TimeoutError as PlaywrightTimeoutError
+        from patchright.sync_api import sync_playwright
+    except Exception:
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError  # type: ignore
+        from playwright.sync_api import sync_playwright  # type: ignore
+
+    billing_country = effective_country(req)
+    body = {
+        "entry_point": "all_plans_pricing_modal",
+        "plan_name": "chatgptplusplan",
+        "billing_details": {
+            "country": billing_country,
+            "currency": currency_for_country(billing_country),
+        },
+        "checkout_ui_mode": (req.checkout_ui_mode or "custom").strip() or "custom",
+    }
+    device_id = req.device_id.strip() or str(uuid.uuid4())
+    session = build_chatgpt_session(req.model_copy(update={"device_id": device_id}))
+    proxy = _playwright_proxy_config(session)
+    request_headers = {
+        "Accept": "*/*",
+        "Authorization": f"Bearer {normalize_access_token(req.access_token)}",
+        "Content-Type": "application/json",
+        "oai-device-id": device_id,
+        "oai-language": "en-US",
+        "x-openai-target-path": "/backend-api/payments/checkout",
+        "x-openai-target-route": "/backend-api/payments/checkout",
+    }
+    timeout_ms = int(max(15.0, min(60.0, CHATGPT_TIMEOUT)) * 1000)
+    result: dict[str, Any] = {}
+    with sync_playwright() as runtime:
+        browser = runtime.chromium.launch(headless=True, proxy=proxy)
+        try:
+            context = browser.new_context(
+                user_agent=req.user_agent.strip() or DEFAULT_USER_AGENT,
+                locale="en-US",
+                ignore_https_errors=True,
+            )
+            context.add_cookies(
+                [{
+                    "name": "oai-did",
+                    "value": device_id,
+                    "domain": "chatgpt.com",
+                    "path": "/",
+                    "secure": True,
+                    "httpOnly": False,
+                }]
+            )
+            page = context.new_page()
+            try:
+                page.goto("https://chatgpt.com/", wait_until="domcontentloaded", timeout=timeout_ms)
+            except PlaywrightTimeoutError:
+                pass
+            result = page.evaluate(
+                """
+                async ({body, headers}) => {
+                  const response = await fetch("https://chatgpt.com/backend-api/payments/checkout", {
+                    method: "POST",
+                    headers,
+                    credentials: "include",
+                    body: JSON.stringify(body),
+                  });
+                  return {
+                    status: response.status,
+                    contentType: response.headers.get("content-type") || "",
+                    text: await response.text(),
+                  };
+                }
+                """,
+                {"body": body, "headers": request_headers},
+            )
+        finally:
+            browser.close()
+
+    status_code = int(result.get("status") or 0)
+    response_text = str(result.get("text") or "")
+    if status_code >= 400 or status_code <= 0:
+        compact = re.sub(r"\s+", " ", response_text).strip()[:800]
+        raise HTTPException(
+            status_code=status_code or 502,
+            detail=(
+                f"playwright checkout create failed: status={status_code or 'unknown'}; "
+                f"content_type={result.get('contentType') or 'unknown'}; body={compact}"
+            ),
+        )
+    try:
+        data = json.loads(response_text or "{}")
+    except Exception as error:
+        raise HTTPException(status_code=502, detail="playwright checkout response was not JSON") from error
+    cs_id = data.get("checkout_session_id") or data.get("session_id") or data.get("id")
+    if not cs_id or not str(cs_id).startswith("cs_"):
+        raise HTTPException(status_code=502, detail="playwright checkout response missing cs_id")
+    return {
+        "cs_id": str(cs_id),
+        "processor_entity": extract_processor_entity(data),
+        "stripe_publishable_key": extract_stripe_publishable_key(data),
+        "billing_country": billing_country,
+        "currency": currency_for_country(billing_country),
+    }
+
+
+def resolve_external_redirect_playwright(
+    session: Any,
+    redirect_url: str,
+    *,
+    timeout_seconds: float = 45,
+) -> str:
+    try:
+        from patchright.sync_api import TimeoutError as PlaywrightTimeoutError
+        from patchright.sync_api import sync_playwright
+    except Exception:
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError  # type: ignore
+        from playwright.sync_api import sync_playwright  # type: ignore
+
+    candidates: list[str] = []
+
+    def remember(value: str) -> None:
+        url = str(value or "").strip()
+        if url and url not in candidates:
+            candidates.append(url)
+
+    timeout_ms = int(max(5, min(90, float(timeout_seconds or 45))) * 1000)
+    proxy = _playwright_proxy_config(session)
+    user_agent = str((getattr(session, "headers", {}) or {}).get("User-Agent") or DEFAULT_USER_AGENT)
+    with sync_playwright() as runtime:
+        browser = runtime.chromium.launch(headless=True, proxy=proxy)
+        try:
+            context = browser.new_context(
+                user_agent=user_agent,
+                locale="en-US",
+                ignore_https_errors=True,
+            )
+            cookies = _playwright_cookies(session)
+            if cookies:
+                try:
+                    context.add_cookies(cookies)
+                except Exception:
+                    for cookie in cookies:
+                        try:
+                            context.add_cookies([cookie])
+                        except Exception:
+                            continue
+            page = context.new_page()
+            page.on("request", lambda request: remember(request.url))
+            page.on("framenavigated", lambda frame: remember(frame.url))
+            try:
+                page.goto(redirect_url, wait_until="domcontentloaded", timeout=timeout_ms)
+            except PlaywrightTimeoutError:
+                pass
+            remember(page.url)
+            for _ in range(12):
+                ba_url = next((item for item in candidates if is_paypal_ba_approve_url(item)), "")
+                if ba_url:
+                    return ba_url
+                page.wait_for_timeout(250)
+                remember(page.url)
+            return next(
+                (item for item in reversed(candidates) if is_paypal_url(item) and not is_ignored_resource_url(item)),
+                page.url or redirect_url,
+            )
+        finally:
+            browser.close()
+
+
 def create_provider_link(
     chatgpt: Any,
     checkout: dict[str, Any],
@@ -2797,13 +4854,13 @@ def create_provider_link(
     provider_proxy: str = "",
     promotion_proxy: str = "",
     billing: dict[str, str] | None = None,
+    stripe_session: Any | None = None,
     emit: Any | None = None,
-) -> dict[str, str]:
+) -> dict[str, Any]:
     stripe_pk = stripe_key_for_request(req, checkout)
     if emit:
         emit("provider", "正在创建 Stripe/Provider 会话。")
-    stripe = build_stripe_session(req, proxy_override=provider_proxy)
-    poll_stripe = build_stripe_session(req, proxy_override=promotion_proxy or promotion_stage_proxy(req))
+    stripe = stripe_session or build_stripe_session(req, proxy_override=provider_proxy)
     ctx = stripe_context(checkout["cs_id"], init_payload, req)
     stripe_amount = str(ctx.get("checkout_amount") or expected_amount(init_payload))
     stripe_amount_source = stripe_amount_info(init_payload)[1]
@@ -2833,27 +4890,136 @@ def create_provider_link(
                 ),
             )
     pm_country = effective_payment_method_country(req)
-    billing = dict(billing or billing_for_country(pm_country))
+    billing = dict(billing or billing_for_request(req, pm_country))
+    confirm_mode = str(getattr(req, "paypal_confirm_mode", "direct") or "direct").strip().lower()
+    confirm_protocol = str(getattr(req, "paypal_confirm_protocol", "standalone") or "standalone").strip().lower()
+    use_payment_method = confirm_mode in {"payment_method", "pm", "legacy"}
+    pm_id = ""
     if emit:
-        emit("billing", f"已选择 PM 账单 {billing['country']} 随机资料：{billing['name']} / {billing['city']}。")
-        emit("payment_method", "Step 5 stripe_create_payment_method：正在向 Stripe 创建 PayPal payment_method。")
-    pm_id = stripe_create_payment_method(stripe, checkout["cs_id"], stripe_pk, billing, ctx)
+        emit("billing", f"已选择 PM 账单 {billing['country']} AT 对齐资料：{billing['name']} / {billing['city']}。")
     if emit:
-        emit("payment_method", f"Step 5 stripe_create_payment_method 成功：{pm_id}。")
-        emit("confirm", "Step 6 stripe_confirm：正在绑定 pm_id 并确认 Stripe checkout。")
-    confirm_payload = stripe_confirm(
-        stripe,
-        checkout["cs_id"],
-        pm_id,
-        stripe_pk,
-        init_payload,
-        ctx,
-        checkout,
-        req,
-        stripe_hosted_url,
+        email_domain = str(billing.get("email") or "").rpartition("@")[2].lower()
+        emit(
+            "billing_profile",
+            "Stripe billing profile recorded.",
+            billing_profile_source=billing_profile_source(pm_country),
+            billing_email_domain=email_domain,
+        )
+    if use_payment_method:
+        if emit:
+            emit("payment_method", "Step 5 stripe_create_payment_method：正在向 Stripe 创建 PayPal payment_method。")
+        pm_id = stripe_create_payment_method(
+            stripe,
+            checkout["cs_id"],
+            stripe_pk,
+            billing,
+            ctx,
+            protocol=str(getattr(req, "paypal_confirm_protocol", "standalone") or "standalone"),
+        )
+        if emit:
+            emit("payment_method", f"Step 5 stripe_create_payment_method 成功：{pm_id}。")
+            emit("confirm", "Step 6 stripe_confirm：正在绑定 pm_id 并确认 Stripe checkout。")
+    elif emit:
+        emit("payment_method", "Step 5 direct PayPal：跳过 pm_ 创建，confirm 将内联 payment_method_data。")
+        emit("confirm", "Step 6 stripe_confirm：正在使用 direct PayPal 数据确认 Stripe checkout。")
+    if confirm_protocol == "chatgpt_confirm":
+        if not use_payment_method or not pm_id:
+            raise HTTPException(status_code=400, detail="chatgpt_confirm protocol requires a PayPal payment_method")
+        approval_chatgpt = build_chatgpt_session(
+            req,
+            proxy_override=approve_stage_proxy(req),
+            source_session=chatgpt,
+        )
+        if emit:
+            emit(
+                "approve",
+                "Using the dedicated approve session for ChatGPT checkout confirm.",
+                approval_session_state_copied=True,
+            )
+        checkout_confirm_payload = chatgpt_checkout_confirm(
+            approval_chatgpt,
+            checkout["cs_id"],
+            checkout,
+            emit=emit,
+        )
+        confirm_payload = stripe_confirm_intent(
+            stripe,
+            pm_id,
+            stripe_pk,
+            checkout_confirm_payload,
+            emit=emit,
+        )
+    else:
+        confirm_payload = stripe_confirm(
+            stripe,
+            checkout["cs_id"],
+            pm_id,
+            stripe_pk,
+            init_payload,
+            ctx,
+            checkout,
+            req,
+            stripe_hosted_url,
+            billing=billing,
+            emit=emit,
+        )
+    if emit:
+        emit(
+            "confirm",
+            (
+                "Step 6 stripe_confirm 已返回；init/PM/confirm 已复用同一左池 Stripe session。"
+                if use_payment_method
+                else "Step 6 stripe_confirm 已返回；init/direct confirm 已复用同一左池 Stripe session。"
+            ),
+            stripe_session_reused=bool(stripe_session),
+            paypal_confirm_mode="payment_method" if use_payment_method else "direct",
+            paypal_confirm_protocol=confirm_protocol,
+        )
+    stripe_poll_egress = str(getattr(req, "stripe_poll_egress", "provider") or "provider").strip().lower()
+    poll_on_provider = stripe_poll_egress == "provider"
+    poll_stripe = (
+        stripe
+        if poll_on_provider
+        else build_stripe_session(
+            req,
+            proxy_override=promotion_proxy or promotion_stage_proxy(req),
+            source_session=stripe,
+        )
     )
     if emit:
-        emit("confirm", "Step 6 stripe_confirm 已返回，正在解析 PayPal/approval 跳转。")
+        emit(
+            "stripe_redirect",
+            "已将 confirm 会话状态同步到右池 Stripe session，继续 poll/redirect。",
+            redirect_session_state_copied=not poll_on_provider,
+            stripe_poll_egress="provider" if poll_on_provider else "promotion",
+        )
+    expected_right_ip = str(
+        checkout.get("provider_proxy_ip" if poll_on_provider else "promotion_proxy_ip") or ""
+    ).strip()
+    expected_right_country = provider_stage_country(req) if poll_on_provider else promotion_stage_country(req)
+    pre_redirect_probe = verify_poll_session_exit(
+        req,
+        poll_stripe,
+        expected_ip=expected_right_ip,
+        expected_country=expected_right_country,
+        label="right session before poll",
+        reuse_provider_session=poll_on_provider,
+    )
+    if emit:
+        emit(
+            "stripe_redirect",
+            (
+                f"右侧 Poll 会话前置出口：{pre_redirect_probe.ip} / {pre_redirect_probe.country_code}。"
+                if pre_redirect_probe.ok and pre_redirect_probe.ip
+                else f"右侧 Poll 会话前置出口校验：{pre_redirect_probe.error or '跳过'}。"
+            ),
+            right_session_expected_ip=expected_right_ip,
+            right_session_pre_ip=pre_redirect_probe.ip,
+            right_session_pre_country=pre_redirect_probe.country_code,
+            right_session_pre_consistent=pre_redirect_probe.ok,
+        )
+    if expected_right_ip and not pre_redirect_probe.ok:
+        raise HTTPException(status_code=502, detail=pre_redirect_probe.error or "right session pre-poll verification failed")
     stripe_redirect_url = redirect_url_after_confirm(
         chatgpt,
         stripe,
@@ -2874,6 +5040,69 @@ def create_provider_link(
         if is_paypal_ba_approve_url(stripe_redirect_url)
         else resolve_external_redirect(poll_stripe, stripe_redirect_url, preferred_hosts=("paypal.com",))
     )
+    playwright_fallback_used = False
+    if (
+        not is_paypal_ba_approve_url(provider_url)
+        and bool(getattr(req, "enable_playwright_redirect_fallback", True))
+        and is_external_url(stripe_redirect_url)
+        and not is_ignored_resource_url(stripe_redirect_url)
+    ):
+        if emit:
+            emit(
+                "redirect",
+                "普通 HTTP 跳转未得到 BA，启动 Playwright 同代理/Cookie 浏览器兜底。",
+                playwright_fallback_started=True,
+            )
+        try:
+            browser_url = resolve_external_redirect_playwright(
+                poll_stripe,
+                stripe_redirect_url,
+                timeout_seconds=min(60.0, post_approve_poll_timeout(req)),
+            )
+            playwright_fallback_used = True
+            if browser_url:
+                provider_url = browser_url
+            if emit:
+                emit(
+                    "redirect",
+                    (
+                        "Playwright 兜底已捕获 PayPal BA 链。"
+                        if is_paypal_ba_approve_url(provider_url)
+                        else "Playwright 兜底完成，但未捕获 BA token。"
+                    ),
+                    playwright_fallback_used=True,
+                    playwright_redirect_host=str(urlsplit(provider_url).hostname or ""),
+                )
+        except Exception as exc:
+            if emit:
+                emit(
+                    "redirect",
+                    f"Playwright 跳转兜底失败：{short_error(str(exc))}",
+                    playwright_fallback_used=True,
+                    playwright_redirect_error=short_error(str(exc), 300),
+                )
+    post_redirect_probe = verify_right_session_exit(
+        poll_stripe,
+        expected_ip=expected_right_ip,
+        expected_country=expected_right_country,
+        label="right session after redirect",
+        required_ip_version=required_proxy_ip_version(req),
+    )
+    if emit:
+        emit(
+            "redirect",
+            (
+                f"右侧 Redirect 会话后置出口：{post_redirect_probe.ip} / {post_redirect_probe.country_code}。"
+                if post_redirect_probe.ok and post_redirect_probe.ip
+                else f"右侧 Redirect 会话后置出口校验：{post_redirect_probe.error or '跳过'}。"
+            ),
+            right_session_expected_ip=expected_right_ip,
+            right_session_post_ip=post_redirect_probe.ip,
+            right_session_post_country=post_redirect_probe.country_code,
+            right_session_post_consistent=post_redirect_probe.ok,
+        )
+    if expected_right_ip and not post_redirect_probe.ok:
+        raise HTTPException(status_code=502, detail=post_redirect_probe.error or "right session post-redirect verification failed")
     if not is_paypal_ba_approve_url(provider_url):
         resource_hint = "仅发现 Stripe 资源 URL，未发现 PayPal BA approve 链；" if is_ignored_resource_url(provider_url) else ""
         pm_redirect_hint = (
@@ -2881,6 +5110,29 @@ def create_provider_link(
             if is_stripe_pm_redirect_url(stripe_redirect_url) or is_stripe_pm_redirect_url(provider_url)
             else ""
         )
+        intermediate_url = stripe_redirect_url if is_stripe_pm_redirect_url(stripe_redirect_url) else ""
+        if intermediate_url and bool(getattr(req, "allow_intermediate_url_fallback", False)):
+            if emit:
+                emit(
+                    "redirect",
+                    "未提取到 BA；已按配置保留 Stripe intermediate_url 备用结果。",
+                    intermediate_url=intermediate_url,
+                    intermediate_url_present=True,
+                    intermediate_fallback_used=True,
+                    playwright_fallback_used=playwright_fallback_used,
+                    failure_category="paypal_redirect",
+                )
+            return {
+                "payment_method_id": pm_id,
+                "stripe_redirect_url": stripe_redirect_url,
+                "provider_redirect_url": provider_url,
+                "long_url": "",
+                "intermediate_url": intermediate_url,
+                "intermediate_fallback_used": True,
+                "playwright_fallback_used": playwright_fallback_used,
+                "stripe_amount": stripe_amount,
+                "stripe_amount_source": stripe_amount_source,
+            }
         raise HTTPException(
             status_code=502,
             detail=(
@@ -2896,6 +5148,9 @@ def create_provider_link(
         "stripe_redirect_url": stripe_redirect_url,
         "provider_redirect_url": provider_url,
         "long_url": provider_url,
+        "intermediate_url": "",
+        "intermediate_fallback_used": False,
+        "playwright_fallback_used": playwright_fallback_used,
         "stripe_amount": stripe_amount,
         "stripe_amount_source": stripe_amount_source,
     }
@@ -2909,7 +5164,7 @@ def create_provider_link_with_retry(
     max_attempts_override: int | None = None,
     attempt_offset: int = 0,
     attempt_limit: int | None = None,
-) -> dict[str, str]:
+) -> dict[str, Any]:
     last_error = ""
     country = provider_stage_country(req)
     promotion_country = promotion_stage_country(req)
@@ -2922,19 +5177,27 @@ def create_provider_link_with_retry(
     for attempt in range(1, max_attempts + 1):
         ensure_not_cancelled()
         display_attempt = attempt_offset + attempt
-        if provider_uses_checkout(req):
+        if bool(getattr(req, "lock_proxy_sessions", False)) or (
+            display_attempt == 1 and bool(getattr(req, "prevalidated_proxy_sessions", False))
+        ):
+            rotated_proxy = provider_stage_proxy(req)
+        elif provider_uses_checkout(req):
             rotated_proxy = provider_stage_proxy(req)
         elif single_proxy_mode(req):
             rotated_proxy = provider_stage_proxy(req)
         else:
             rotated_proxy = rotated_stage_proxy_for_attempt(req, "provider", country, provider_stage_proxy(req), used_bases=used_provider_bases)
         attempt_req = request_with_stage_proxy(req, "provider", rotated_proxy, country)
-        rotated_promotion_proxy = rotated_stage_proxy_for_attempt(
-            attempt_req,
-            "promotion",
-            promotion_country,
-            promotion_stage_proxy(attempt_req),
-            used_bases=used_promotion_bases,
+        rotated_promotion_proxy = (
+            promotion_stage_proxy(attempt_req)
+            if bool(getattr(req, "lock_proxy_sessions", False))
+            or (display_attempt == 1 and bool(getattr(req, "prevalidated_proxy_sessions", False)))
+            else promotion_proxy_for_provider_attempt(
+                attempt_req,
+                rotated_proxy,
+                promotion_country,
+                used_bases=used_promotion_bases,
+            )
         )
         attempt_req = request_with_stage_proxy(
             attempt_req,
@@ -2952,7 +5215,9 @@ def create_provider_link_with_retry(
                 link_attempt_limit=display_limit,
                 provider_country=country,
                 promotion_country=promotion_country,
-        )
+                left_sticky_rotated=not single_proxy_mode(attempt_req),
+                right_sticky_rotated=not single_proxy_mode(attempt_req),
+            )
         if emit:
             if provider_uses_checkout(req):
                 session_text = "复用 checkout sticky session"
@@ -2964,9 +5229,17 @@ def create_provider_link_with_retry(
         if not provider_probe.ok:
             last_error = provider_probe.error or f"{label} 代理不可用"
             if emit:
-                emit("proxy", f"{label} session 不可用，准备更换：{last_error}")
+                emit(
+                    "proxy",
+                    f"{label} session 不可用，准备更换：{last_error}",
+                    proxy_stage="provider",
+                    proxy_ip=provider_probe.ip,
+                    proxy_country_code=provider_probe.country_code,
+                    expected_country=country,
+                    failure_category=proxy_probe_failure_category(provider_probe, country),
+                )
                 if attempt < max_attempts:
-                    emit("proxy", f"provider 出口检测异常/国家不符，{PROXY_EXIT_RETRY_DELAY_SECONDS}秒后重试 {attempt + 1}/{max_attempts}。")
+                    emit("proxy", f"provider 出口检测异常/国家或地址族不符，{PROXY_EXIT_RETRY_DELAY_SECONDS}秒后重试 {attempt + 1}/{max_attempts}。")
             if attempt < max_attempts:
                 cancellable_sleep(PROXY_EXIT_RETRY_DELAY_SECONDS)
             continue
@@ -2997,17 +5270,43 @@ def create_provider_link_with_retry(
                 expected_country=country,
             )
             emit("proxy", f"右池 {promotion_country}：正在检测 promotion/update/poll 出口。")
-        promotion_probe = probe_proxy(
-            f"promotion/update/poll {promotion_country}",
+        promotion_probe = promotion_probe_for_provider_attempt(
+            attempt_req,
+            provider_probe,
             promotion_proxy,
             promotion_country,
-            required=True,
-            parent_proxy=chain_parent_proxy(attempt_req),
         )
         if not promotion_probe.ok:
             last_error = promotion_probe.error or f"promotion/update/poll {promotion_country} 代理不可用"
             if emit:
-                emit("proxy", f"右池 session 不可用，准备更换：{last_error}")
+                emit(
+                    "proxy",
+                    f"右池 session 不可用，准备更换：{last_error}",
+                    proxy_stage="promotion",
+                    proxy_ip=promotion_probe.ip,
+                    proxy_country_code=promotion_probe.country_code,
+                    expected_country=promotion_country,
+                    failure_category=proxy_probe_failure_category(promotion_probe, promotion_country),
+                )
+            if attempt < max_attempts:
+                cancellable_sleep(PROXY_EXIT_RETRY_DELAY_SECONDS)
+            continue
+        if right_stage_same_proxy_required(attempt_req) and not proxy_ip_matches(provider_probe.ip, promotion_probe.ip):
+            last_error = (
+                "right_proxy_ip_mismatch: "
+                f"provider={provider_probe.ip or 'unknown'}, promotion={promotion_probe.ip or 'unknown'}"
+            )
+            if emit:
+                emit(
+                    "proxy",
+                    "右侧 IP 一致性检查失败："
+                    f"Provider={provider_probe.ip or '未知'}，Promotion/Poll={promotion_probe.ip or '未知'}；更换 sticky 会话重试。",
+                    proxy_stage="promotion",
+                    proxy_ip=promotion_probe.ip,
+                    proxy_country_code=promotion_probe.country_code,
+                    expected_proxy_ip=provider_probe.ip,
+                    failure_category="proxy_ip_mismatch",
+                )
             if attempt < max_attempts:
                 cancellable_sleep(PROXY_EXIT_RETRY_DELAY_SECONDS)
             continue
@@ -3022,8 +5321,9 @@ def create_provider_link_with_retry(
                 proxy_country_code=promotion_probe.country_code,
                 expected_country=promotion_country,
             )
+        stripe_session = None
         try:
-            init_payload, stripe_hosted_url, billing = prepare_paypal_after_sync(
+            init_payload, stripe_hosted_url, billing, stripe_session = prepare_paypal_after_sync(
                 chatgpt,
                 checkout,
                 attempt_req,
@@ -3031,12 +5331,24 @@ def create_provider_link_with_retry(
                 promotion_proxy=promotion_proxy,
                 emit=emit,
             )
+            paypal_availability = classify_paypal_availability(init_payload)
             if emit:
                 emit("stripe_init", "Step 4 stripe_init 成功，已确认 Stripe 前端支付环境。")
                 emit(
                     "stripe_methods",
-                    f"Stripe init 支付方式线索：{summarize_payment_method_hints(init_payload)}",
-                    paypal_hint=init_payload_has_paypal_hint(init_payload),
+                    f"Stripe init PayPal 可用性={paypal_availability['status']}；支付方式线索：{summarize_payment_method_hints(init_payload)}",
+                    paypal_hint=paypal_availability["status"] == PAYPAL_AVAILABILITY_SUPPORTED,
+                    paypal_availability=paypal_availability["status"],
+                    paypal_methods=paypal_availability["methods"],
+                    paypal_evidence_paths=paypal_availability["evidence_paths"],
+                )
+            if paypal_availability["status"] == PAYPAL_AVAILABILITY_UNSUPPORTED and emit:
+                emit(
+                    "stripe_methods",
+                    "Stripe init 未声明 PayPal；按目标站兼容流程继续创建 PayPal PaymentMethod。",
+                    paypal_availability=paypal_availability["status"],
+                    paypal_methods=paypal_availability["methods"],
+                    paypal_evidence_paths=paypal_availability["evidence_paths"],
                 )
             provider = create_provider_link(
                 chatgpt,
@@ -3047,6 +5359,7 @@ def create_provider_link_with_retry(
                 provider_proxy=provider_proxy,
                 promotion_proxy=promotion_proxy,
                 billing=billing,
+                stripe_session=stripe_session,
                 emit=emit,
             )
             provider["stripe_hosted_url"] = stripe_hosted_url
@@ -3061,6 +5374,7 @@ def create_provider_link_with_retry(
                     link_attempt_count=display_attempt,
                     link_attempt_limit=display_limit,
                     provider_country=country,
+                    attempt_status="success",
                 )
             return provider
         except HTTPException as exc:
@@ -3074,9 +5388,19 @@ def create_provider_link_with_retry(
                     link_attempt_count=display_attempt,
                     link_attempt_limit=display_limit,
                     provider_country=country,
+                    attempt_status="failed",
+                    attempt_error=short_error(last_error),
+                    failure_category="generic_decline" if "generic_decline" in last_error.lower() else "",
                 )
             if emit:
-                emit("provider", f"左右双池流程返回可重试错误，准备更换 session：{short_error(last_error)}")
+                if "generic_decline" in last_error.lower():
+                    emit(
+                        "provider",
+                        "Stripe 返回 generic_decline；下一轮将丢弃本次 checkout 并同时轮换左右 sticky session。",
+                        failure_category="generic_decline",
+                    )
+                else:
+                    emit("provider", f"左右双池流程返回可重试错误，准备更换 session：{short_error(last_error)}")
                 if attempt < max_attempts:
                     emit("provider", f"provider/Stripe 可重试错误，{PROXY_EXIT_RETRY_DELAY_SECONDS}秒后重试 {attempt + 1}/{max_attempts}。")
             if attempt < max_attempts:
@@ -3092,12 +5416,17 @@ def create_provider_link_with_retry(
                     link_attempt_count=display_attempt,
                     link_attempt_limit=display_limit,
                     provider_country=country,
+                    attempt_status="failed",
+                    attempt_error=short_error(last_error),
+                    failure_category="proxy_network",
                 )
                 emit("provider", f"左右双池网络异常，准备更换 session：{short_error(last_error)}")
                 if attempt < max_attempts:
                     emit("provider", f"provider 网络异常，{PROXY_EXIT_RETRY_DELAY_SECONDS}秒后重试 {attempt + 1}/{max_attempts}。")
             if attempt < max_attempts:
                 cancellable_sleep(PROXY_EXIT_RETRY_DELAY_SECONDS)
+        finally:
+            close_session(stripe_session)
     raise HTTPException(
         status_code=504,
         detail=f"provider 提链已达到上限 {max_attempts} 次仍失败: {short_error(last_error)}",
@@ -3751,11 +6080,12 @@ def run_pp_zero_paypal_flow(req: LongLinkRequest, emit: Any | None = None) -> Lo
     flow_type = "paypal_zero_usd"
     log(
         "start",
-        "开始执行 PP 0元订阅提链链路：左池 checkout → 右池 promotion/taxes → 左池 Stripe/approve → 右池 poll/redirect。",
+        "开始执行 PP 0元订阅提链链路：Checkout → Promotion/Taxes → Provider → Approve → Poll/Redirect。",
     )
     log(
         "precheck_ip",
-        f"Step 1 precheck_ip：左池 checkout/provider/approve={checkout_stage_country(req)}，右池 update/poll={promotion_stage_country(req)}。",
+        f"Step 1 precheck_ip：Checkout={checkout_stage_country(req)}，Provider={provider_stage_country(req)}，"
+        f"Approve={approve_stage_country(req)}，Update/Poll={promotion_stage_country(req)}。",
     )
     if chain_parent_proxy(req):
         log("precheck_ip", "本地链式代理已启用：本程序 → Clash → 住宅代理。")
@@ -3768,10 +6098,11 @@ def run_pp_zero_paypal_flow(req: LongLinkRequest, emit: Any | None = None) -> Lo
     provider = create_provider_link_with_retry(chatgpt, checkout, run_req, emit=log)
     stripe_hosted_url = provider["stripe_hosted_url"]
     hosted_long_url = to_openai_pay_url(stripe_hosted_url)
-    log("done", "PP 0元订阅 BA 链提取完成。")
+    intermediate_fallback_used = bool(provider.get("intermediate_fallback_used"))
+    log("done", "PP 0元订阅已返回中转备用链接。" if intermediate_fallback_used else "PP 0元订阅 BA 链提取完成。")
 
     return LongLinkResponse(
-        ok=True,
+        ok=bool(provider.get("long_url")),
         cs_id=checkout["cs_id"],
         processor_entity=checkout["processor_entity"],
         billing_country=checkout["billing_country"],
@@ -3784,10 +6115,14 @@ def run_pp_zero_paypal_flow(req: LongLinkRequest, emit: Any | None = None) -> Lo
         payment_method_id=provider["payment_method_id"],
         stripe_redirect_url=provider["stripe_redirect_url"],
         provider_redirect_url=provider["provider_redirect_url"],
-        fallback=False,
-        provider_error="",
+        fallback=intermediate_fallback_used,
+        provider_error="paypal_ba_not_resolved" if intermediate_fallback_used else "",
         stripe_hosted_url=stripe_hosted_url,
-        long_url=provider["long_url"] or hosted_long_url,
+        long_url=str(provider.get("long_url") or ""),
+        intermediate_url=str(provider.get("intermediate_url") or ""),
+        intermediate_url_present=bool(provider.get("intermediate_url")),
+        intermediate_fallback_used=intermediate_fallback_used,
+        playwright_fallback_used=bool(provider.get("playwright_fallback_used")),
         stripe_amount=provider.get("stripe_amount", ""),
         stripe_amount_source=provider.get("stripe_amount_source", ""),
         link_attempt_count=int(str(provider.get("link_attempt_count") or 0) or 0),
@@ -3965,6 +6300,41 @@ def emit_combo_result(
 
 def summarize_combo_failure(detail: str) -> str:
     text = str(detail or "")
+    lowered = text.lower()
+    for stage in (
+        "checkout promotion update failed",
+        "checkout taxes update failed",
+        "stripe init failed",
+        "stripe payment_methods failed",
+        "stripe confirm failed",
+    ):
+        if stage not in lowered:
+            continue
+        parts = [stage]
+        for label, pattern in (
+            ("status", r"\bstatus\s*[=:]\s*(\d{3})"),
+            ("content_type", r"\bcontent_type\s*[=:]\s*([^,;\s]+)"),
+            ("title", r"\btitle\s*[=:]\s*([^,;]+)"),
+        ):
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                parts.append(f"{label}={match.group(1).strip()}")
+        return short_error("; ".join(parts), 220)
+    if "stripe submission failed" in lowered:
+        parts = ["stripe submission failed"]
+        for label, pattern in (
+            ("state", r"\bsubmission_state\s*[=:]\s*([^,;\s]+)"),
+            ("reason", r"\bsubmission_reason\s*[=:]\s*([^,;]+)"),
+            ("code", r"\bsubmission_code\s*[=:]\s*([^,;]+)"),
+            ("message", r"\bsubmission_message\s*[=:]\s*([^,;]+)"),
+        ):
+            match = re.search(pattern, text, re.IGNORECASE)
+            if not match:
+                continue
+            value = match.group(1).strip()
+            if value and value.lower() not in {"none", "unknown", "null", "无", "未知"}:
+                parts.append(f"{label}={value}")
+        return short_error("; ".join(parts), 300)
     markers = [
         r"confirm_error_reason=([^,，;；]+)",
         r"confirm_error_code=([^,，;；]+)",
@@ -3981,7 +6351,6 @@ def summarize_combo_failure(detail: str) -> str:
             value = match.group(1).strip()
             if value and value.lower() not in {"无", "none", "unknown", "未知"}:
                 return short_error(value, 80)
-    lowered = text.lower()
     if "blocked/exception burst failed" in lowered:
         return "approve blocked/exception 复投失败"
     if "chatgpt approve retryable result" in lowered:
@@ -4083,34 +6452,156 @@ def run_strict_sticky_combo(
         f"当前组合：checkout账单={checkout_country}/{currency_for_country(checkout_country)}，"
         f"PM账单轮询={','.join(pm_countries)}，左池={provider_country}，右池={promotion_stage_country(req)}。",
     )
-    log("proxy", "双池严格模式：每轮重建 checkout；左池 checkout/provider/approve 共用 sticky IP，右池 update/poll 独立轮换。")
+    log(
+        "proxy",
+        f"分阶段严格模式：每轮重建 checkout；Checkout={checkout_stage_country(req)}，"
+        f"Provider={provider_stage_country(req)}，Approve={approve_stage_country(req)}，"
+        f"Update/Poll={promotion_stage_country(req)}。",
+    )
 
     used_checkout_bases: set[str] = set()
-    for attempt in range(1, max_attempts + 1):
+    used_provider_bases: set[str] = set()
+    used_promotion_bases: set[str] = set()
+    attempt = 1
+    quality_candidate = 0
+    while attempt <= max_attempts:
         ensure_not_cancelled()
+        quality_candidate += 1
+        candidate_sequence = attempt + quality_candidate - 1
         attempt_pm_country = pm_countries[(attempt - 1) % len(pm_countries)]
-        run_req = request_with_rotated_checkout_session(req.model_copy(update={"payment_method_country": attempt_pm_country}), used_bases=used_checkout_bases)
-        checkout_country_label = checkout_stage_country(run_req)
-        log(
-            "link_attempt",
-            f"提链尝试 {attempt}/{max_attempts}：PM账单={attempt_pm_country}，新建 checkout 并更换 {checkout_country_label} sticky IP。",
-            link_attempt_count=attempt,
-            link_attempt_limit=max_attempts,
-            provider_country=provider_country,
+        base_req = req.model_copy(update={"payment_method_country": attempt_pm_country})
+        parent_assignment: dict[str, Any] = {}
+        parent_rotation_error = ""
+        if bool(getattr(base_req, "proxy_quality_gate_enabled", False)) and attempt > 1:
+            try:
+                base_req, parent_assignment = rotate_parent_proxy_for_attempt(base_req, candidate_sequence)
+            except Exception as error:
+                parent_rotation_error = short_error(str(error), 280)
+        run_req = (
+            base_req
+            if attempt == 1 and bool(getattr(req, "prevalidated_proxy_sessions", False))
+            else request_with_rotated_checkout_session(base_req, used_bases=used_checkout_bases)
         )
-        log("proxy", f"第 {attempt}/{max_attempts} 轮：已生成新的 {checkout_country_label} sticky session，checkout/provider 共用。")
+        quality_enabled = bool(getattr(run_req, "proxy_quality_gate_enabled", False))
+        if quality_enabled and not (attempt == 1 and bool(getattr(req, "prevalidated_proxy_sessions", False))):
+            if provider_uses_checkout(run_req) or single_proxy_mode(run_req):
+                provider_proxy = provider_stage_proxy(run_req)
+            else:
+                provider_proxy = rotated_stage_proxy_for_attempt(
+                    run_req,
+                    "provider",
+                    provider_stage_country(run_req),
+                    provider_stage_proxy(run_req),
+                    used_bases=used_provider_bases,
+                )
+            run_req = request_with_stage_proxy(run_req, "provider", provider_proxy, provider_stage_country(run_req))
+            promotion_proxy = promotion_proxy_for_provider_attempt(
+                run_req,
+                provider_proxy,
+                promotion_stage_country(run_req),
+                used_bases=used_promotion_bases,
+            )
+            run_req = request_with_stage_proxy(
+                run_req,
+                "promotion",
+                promotion_proxy,
+                promotion_stage_country(run_req),
+            )
+        checkout_country_label = checkout_stage_country(run_req)
+        session_note = "checkout/provider 共用" if provider_uses_checkout(run_req) else "供 checkout/approve 复用"
         checkout_proxy_text = "统一代理" if single_proxy_mode(run_req) else f"{checkout_country_label} 代理"
+        chatgpt = None
         try:
+            if parent_rotation_error:
+                log(
+                    "quality_gate",
+                    f"正式第 {attempt}/{max_attempts} 次提链前，候选第 {quality_candidate} 组父代理切换失败：{parent_rotation_error}",
+                    failure_category="proxy_quality_gate",
+                )
+                cancellable_sleep(1)
+                continue
+            if parent_assignment:
+                log(
+                    "quality_gate",
+                    f"正式第 {attempt}/{max_attempts} 次提链前，候选第 {quality_candidate} 组父代理已切换："
+                    f"{parent_assignment.get('label') or 'Plus 专用节点'}。",
+                )
+            if quality_enabled and not (attempt == 1 and bool(getattr(req, "prevalidated_proxy_sessions", False))):
+                log(
+                    "quality_gate",
+                    f"正式第 {attempt}/{max_attempts} 次提链前，正在验证候选第 {quality_candidate} 组三出口 session。",
+                )
+                quality = check_request_proxy_quality(run_req, rounds=1)
+                for item in quality.get("stages") or []:
+                    if not isinstance(item, dict):
+                        continue
+                    log(
+                        "proxy",
+                        f"轮次闸门 {item.get('label') or item.get('stage')}："
+                        f"{item.get('ip') or '未知 IP'} / {item.get('country') or '未知'}。",
+                        proxy_stage=str(item.get("stage") or ""),
+                        proxy_ip=str(item.get("ip") or ""),
+                        proxy_country_code=str(item.get("country") or ""),
+                        expected_country=str(item.get("expected_country") or ""),
+                        failure_category="" if item.get("ok") else "proxy_quality_gate",
+                    )
+                if not bool(quality.get("ok")):
+                    quality_error = short_error(str(quality.get("error") or "三出口质量检测失败"), 280)
+                    failed_stage = str(quality.get("failed_stage") or "")
+                    parent_failure_markers = ("connect", "tls", "502", "closed abruptly", "connection")
+                    if (
+                        parent_assignment
+                        and failed_stage == "checkout"
+                        and any(marker in quality_error.lower() for marker in parent_failure_markers)
+                    ):
+                        proxy_pool_store.report_proxy_failure(
+                            parent_assignment,
+                            quality_error,
+                            quarantine_seconds=300,
+                        )
+                    log(
+                        "quality_gate",
+                        f"正式第 {attempt}/{max_attempts} 次提链前，候选第 {quality_candidate} 组三出口未通过："
+                        f"{quality_error}；继续更换候选，不消耗提链次数。",
+                        failure_category="proxy_quality_gate",
+                    )
+                    cancellable_sleep(1)
+                    continue
+                log(
+                    "quality_gate",
+                    f"正式第 {attempt}/{max_attempts} 次提链前，候选第 {quality_candidate} 组三出口质量通过。",
+                )
+            log(
+                "link_attempt",
+                f"提链尝试 {attempt}/{max_attempts}：PM账单={attempt_pm_country}，新建 checkout 并使用已通过质量筛选的 {checkout_country_label} sticky IP。",
+                link_attempt_count=attempt,
+                link_attempt_limit=max_attempts,
+                provider_country=provider_country,
+                reset_attempt_diagnostics=True,
+            )
+            log("proxy", f"第 {attempt}/{max_attempts} 次正式提链：已锁定 {checkout_country_label} sticky session，{session_note}。")
+            if quality_enabled:
+                run_req = run_req.model_copy(update={"lock_proxy_sessions": True})
             log("checkout", f"正在使用 {checkout_proxy_text} 创建 ChatGPT checkout。")
-            run_req, chatgpt, checkout = create_checkout_with_retry(run_req, emit=log)
+            # This function already owns the full sticky-session retry loop.
+            # A second Checkout retry loop here multiplied N configured rounds
+            # into N*N POSTs and quickly turned temporary 403s into sustained
+            # rate/risk blocking.
+            run_req, chatgpt, checkout = create_checkout_with_retry(
+                run_req,
+                emit=log,
+                max_attempts_override=1,
+                rotate_first_attempt=False,
+            )
             log("checkout", f"checkout 创建成功：{checkout['cs_id']} / {checkout['billing_country']} / {checkout['currency']}。")
             stripe_key_source = (
                 "手动填写"
                 if run_req.stripe_publishable_key.strip()
                 else ("checkout 响应" if checkout.get("stripe_publishable_key") else "内置默认")
             )
-            log("stripe_init", f"Stripe key 来源：{stripe_key_source}，checkout_ui_mode=custom。")
-            log("provider", f"正在复用 checkout sticky IP 执行 provider：{provider_country}；approve 阶段不强制同 IP。")
+            log("stripe_init", f"Stripe key 来源：{stripe_key_source}，checkout_ui_mode={run_req.checkout_ui_mode}。")
+            provider_note = "复用 checkout sticky IP" if provider_uses_checkout(run_req) else "切换到独立 Provider sticky IP"
+            log("provider", f"正在{provider_note}执行 provider：{provider_country}。")
             provider = create_provider_link_with_retry(
                 chatgpt,
                 checkout,
@@ -4122,10 +6613,11 @@ def run_strict_sticky_combo(
             )
             stripe_hosted_url = provider["stripe_hosted_url"]
             hosted_long_url = to_openai_pay_url(stripe_hosted_url)
-            log("done", "PP 链提取完成。")
+            intermediate_fallback_used = bool(provider.get("intermediate_fallback_used"))
+            log("done", "PP 链未得到 BA，已返回中转备用链接。" if intermediate_fallback_used else "PP 链提取完成。")
 
             return LongLinkResponse(
-                ok=True,
+                ok=bool(provider.get("long_url")),
                 cs_id=checkout["cs_id"],
                 processor_entity=checkout["processor_entity"],
                 billing_country=checkout["billing_country"],
@@ -4138,10 +6630,18 @@ def run_strict_sticky_combo(
                 payment_method_id=provider["payment_method_id"],
                 stripe_redirect_url=provider["stripe_redirect_url"],
                 provider_redirect_url=provider["provider_redirect_url"],
-                fallback=fallback,
-                provider_error="; ".join(prior_failures + attempt_failures),
+                fallback=fallback or intermediate_fallback_used,
+                provider_error=(
+                    "paypal_ba_not_resolved"
+                    if intermediate_fallback_used
+                    else "; ".join(prior_failures + attempt_failures)
+                ),
                 stripe_hosted_url=stripe_hosted_url,
-                long_url=provider["long_url"] or hosted_long_url,
+                long_url=str(provider.get("long_url") or ""),
+                intermediate_url=str(provider.get("intermediate_url") or ""),
+                intermediate_url_present=bool(provider.get("intermediate_url")),
+                intermediate_fallback_used=intermediate_fallback_used,
+                playwright_fallback_used=bool(provider.get("playwright_fallback_used")),
                 stripe_amount=provider.get("stripe_amount", ""),
                 stripe_amount_source=provider.get("stripe_amount_source", ""),
                 link_attempt_count=int(str(provider.get("link_attempt_count") or attempt) or 0),
@@ -4158,10 +6658,22 @@ def run_strict_sticky_combo(
                 link_attempt_count=attempt,
                 link_attempt_limit=max_attempts,
                 provider_country=provider_country,
+                attempt_status="failed",
+                attempt_error=short_error(last_error),
+                failure_category="generic_decline" if "generic_decline" in last_error.lower() else "",
             )
             if attempt < max_attempts:
-                log("proxy", f"丢弃本轮 checkout，{PROXY_EXIT_RETRY_DELAY_SECONDS}秒后换新 sticky IP 重开。")
+                rotation_reason = "generic_decline，" if "generic_decline" in last_error.lower() else ""
+                log(
+                    "proxy",
+                    f"{rotation_reason}丢弃本轮 checkout，{PROXY_EXIT_RETRY_DELAY_SECONDS}秒后同时轮换左右 sticky IP 重开。",
+                    failure_category="generic_decline" if rotation_reason else "",
+                    left_sticky_rotated=True,
+                    right_sticky_rotated=True,
+                )
                 cancellable_sleep(PROXY_EXIT_RETRY_DELAY_SECONDS)
+                attempt += 1
+                quality_candidate = 0
                 continue
             break
         except Exception as exc:
@@ -4175,12 +6687,19 @@ def run_strict_sticky_combo(
                 link_attempt_count=attempt,
                 link_attempt_limit=max_attempts,
                 provider_country=provider_country,
+                attempt_status="failed",
+                attempt_error=short_error(last_error),
+                failure_category="proxy_network",
             )
             if attempt < max_attempts:
                 log("proxy", f"丢弃本轮 checkout，{PROXY_EXIT_RETRY_DELAY_SECONDS}秒后换新 sticky IP 重开。")
                 cancellable_sleep(PROXY_EXIT_RETRY_DELAY_SECONDS)
+                attempt += 1
+                quality_candidate = 0
                 continue
             break
+        finally:
+            close_session(chatgpt)
 
     raise HTTPException(
         status_code=504,
@@ -4196,7 +6715,9 @@ def run_single_combo(
     prior_failures: list[str],
     emit: Any | None = None,
 ) -> LongLinkResponse:
-    if bool(getattr(req, "strict_same_proxy_ip", True)) and provider_uses_checkout(req):
+    if (
+        bool(getattr(req, "strict_same_proxy_ip", True)) and provider_uses_checkout(req)
+    ) or bool(getattr(req, "recreate_checkout_per_attempt", False)):
         return run_strict_sticky_combo(req, checkout_country, pm_country, fallback, prior_failures, emit=emit)
 
     def log(step: str, message: str, **extra: Any) -> None:
@@ -4240,15 +6761,16 @@ def run_single_combo(
         if run_req.stripe_publishable_key.strip()
         else ("checkout 响应" if checkout.get("stripe_publishable_key") else "内置默认")
     )
-    log("stripe_init", f"Stripe key 来源：{stripe_key_source}；checkout_ui_mode=custom。")
+    log("stripe_init", f"Stripe key 来源：{stripe_key_source}；checkout_ui_mode={run_req.checkout_ui_mode}。")
     log("provider", f"正在切换到 provider 阶段代理：{provider_country}。")
     provider = create_provider_link_with_retry(chatgpt, checkout, run_req, emit=log)
     stripe_hosted_url = provider["stripe_hosted_url"]
     hosted_long_url = to_openai_pay_url(stripe_hosted_url)
-    log("done", "PP 链提取完成。")
+    intermediate_fallback_used = bool(provider.get("intermediate_fallback_used"))
+    log("done", "PP 链未得到 BA，已返回中转备用链接。" if intermediate_fallback_used else "PP 链提取完成。")
 
     return LongLinkResponse(
-        ok=True,
+        ok=bool(provider.get("long_url")),
         cs_id=checkout["cs_id"],
         processor_entity=checkout["processor_entity"],
         billing_country=checkout["billing_country"],
@@ -4260,10 +6782,14 @@ def run_single_combo(
         payment_method_id=provider["payment_method_id"],
         stripe_redirect_url=provider["stripe_redirect_url"],
         provider_redirect_url=provider["provider_redirect_url"],
-        fallback=fallback,
-        provider_error="; ".join(prior_failures),
+        fallback=fallback or intermediate_fallback_used,
+        provider_error="paypal_ba_not_resolved" if intermediate_fallback_used else "; ".join(prior_failures),
         stripe_hosted_url=stripe_hosted_url,
-        long_url=provider["long_url"] or hosted_long_url,
+        long_url=str(provider.get("long_url") or ""),
+        intermediate_url=str(provider.get("intermediate_url") or ""),
+        intermediate_url_present=bool(provider.get("intermediate_url")),
+        intermediate_fallback_used=intermediate_fallback_used,
+        playwright_fallback_used=bool(provider.get("playwright_fallback_used")),
         stripe_amount=provider.get("stripe_amount", ""),
         stripe_amount_source=provider.get("stripe_amount_source", ""),
         link_attempt_count=int(str(provider.get("link_attempt_count") or 0) or 0),

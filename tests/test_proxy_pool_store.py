@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import json
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -57,6 +59,28 @@ class ProxyPoolAssignmentTests(unittest.TestCase):
         self.assertEqual(first["label"], "node-a")
         self.assertEqual(reused["label"], "node-a")
 
+    def test_residential_direct_mode_isolated_from_subscription_nodes(self) -> None:
+        proxy_pool_store.update_proxy_pool_config({
+            "enabled": True,
+            "mode": "per_task",
+            "strategy": "round_robin",
+            "node_mode": "residential_direct",
+            "residential_proxy_text": "\n".join([
+                "res-a.example:1000:user-a:pass-a",
+                "user-b:pass-b@res-b.example:1001",
+            ]),
+        })
+
+        first = proxy_pool_store.assign_proxy(1, total_threads=2, slot_index=0)
+        second = proxy_pool_store.assign_proxy(2, total_threads=2, slot_index=1)
+
+        self.assertEqual(first["source"], "residential_direct")
+        self.assertEqual(first["proxy"], "http://user-a:pass-a@res-a.example:1000")
+        self.assertEqual(second["proxy"], "http://user-b:pass-b@res-b.example:1001")
+        public = proxy_pool_store.get_proxy_pool_config()
+        self.assertEqual(public["residential_proxy_count"], 2)
+        self.assertNotIn("residential_proxies", public)
+
     def test_node_mode_does_not_fall_through_to_direct_nodes(self) -> None:
         proxy_pool_store.update_proxy_pool_config({
             "enabled": True,
@@ -103,6 +127,55 @@ class ProxyPoolAssignmentTests(unittest.TestCase):
         self.assertEqual(assignment, expected)
         self.assertEqual(assign.call_args.kwargs["name_filter"], "anytls-aw")
         self.assertFalse(assign.call_args.kwargs["validate_node"])
+
+    def test_managed_loopback_api_bypasses_cached_system_proxy(self) -> None:
+        response = MagicMock()
+        response.read.return_value = b'{"ok": true}'
+        response.__enter__.return_value = response
+        opener = MagicMock()
+        opener.open.return_value = response
+
+        with (
+            patch("services.managed_mihomo_service.urllib.request.build_opener", return_value=opener) as build_opener,
+            patch("services.managed_mihomo_service.urllib.request.urlopen") as urlopen,
+        ):
+            result = managed_mihomo_service._request_json("http://127.0.0.1:43000/proxies")
+
+        self.assertEqual(result, {"ok": True})
+        build_opener.assert_called_once()
+        self.assertEqual(build_opener.call_args.args[0].proxies, {})
+        opener.open.assert_called_once()
+        urlopen.assert_not_called()
+
+    def test_plus_subscription_is_persisted_without_filtering_registration(self) -> None:
+        proxy_pool_store.update_proxy_pool_config({"plus_subscription_id": "sub_plus"})
+        store = proxy_pool_store.get_proxy_pool_config(include_secret=True)
+        self.assertEqual(store["plus_subscription_id"], "sub_plus")
+
+        proxy_pool_store.update_proxy_pool_config({
+            "enabled": True,
+            "node_mode": "managed_mihomo",
+        })
+        expected = {"proxy": "http://127.0.0.1:42000", "source": "managed_mihomo", "label": "registration-node"}
+        with patch("services.managed_mihomo_service.managed_mihomo_manager.assign", return_value=expected) as assign:
+            proxy_pool_store.assign_proxy(1, purpose="registration")
+        self.assertEqual(assign.call_args.kwargs["name_filter"], "")
+
+    def test_private_subscription_permission_survives_save_and_update(self) -> None:
+        created = proxy_pool_store.add_subscriptions([
+            {
+                "name": "local-subscription",
+                "url": "http://127.0.0.1:18080/subscription",
+                "allow_private": True,
+            }
+        ], fetch=False)
+        subscription = created["subscriptions"][0]
+        self.assertTrue(subscription["allow_private"])
+
+        updated = proxy_pool_store.update_proxy_pool_config({
+            "subscriptions": [{"id": subscription["id"], "allow_private": False}],
+        })
+        self.assertFalse(updated["subscriptions"][0]["allow_private"])
 
     def test_registration_proxy_record_preserves_managed_node_identity(self) -> None:
         record = proxy_pool_store.registration_proxy_record({
@@ -272,6 +345,96 @@ proxies:
         quarantined = manager.status()["quarantined"]
         self.assertEqual([item["name"] for item in quarantined], ["node-a"])
 
+    def test_managed_runtime_quarantine_is_scoped_by_assignment_purpose(self) -> None:
+        manager = ManagedMihomoManager()
+        manager.report_failure({
+            "source": "managed_mihomo",
+            "label": "node-a",
+            "purpose": "inventory_health",
+            "node": {"name": "node-a"},
+        }, "TLS connect error", quarantine_seconds=120)
+
+        self.assertIn("node-a", manager._active_quarantine_locked("inventory_health"))
+        self.assertNotIn("node-a", manager._active_quarantine_locked("plus_parent_proxy"))
+        quarantined = manager.status()["quarantined"]
+        self.assertEqual(quarantined[0]["purpose"], "inventory_health")
+
+    def test_managed_assignment_network_wait_does_not_hold_manager_lock(self) -> None:
+        manager = ManagedMihomoManager()
+        entered = threading.Event()
+        release = threading.Event()
+        errors: list[Exception] = []
+        instance = SimpleNamespace(
+            running=lambda: True,
+            assignment_lock=threading.RLock(),
+            process=SimpleNamespace(pid=1234),
+            fingerprint="test",
+            selected="",
+            proxy_url="http://127.0.0.1:42000",
+            api_base="http://127.0.0.1:43000",
+        )
+        manager._instances[0] = instance
+
+        def candidates(*_args, **_kwargs):
+            entered.set()
+            release.wait(2)
+            return ["node-a"]
+
+        def run_assignment() -> None:
+            try:
+                manager.assign(
+                    slot=0,
+                    task_index=1,
+                    total_threads=1,
+                    store={"mode": "per_task", "strategy": "round_robin", "max_retry_count": 1},
+                    purpose="test",
+                    validate_node=False,
+                )
+            except Exception as error:  # pragma: no cover - asserted below
+                errors.append(error)
+
+        with (
+            patch.object(manager, "_ensure_locked"),
+            patch.object(manager, "_candidate_names", side_effect=candidates),
+            patch.object(managed_mihomo_service, "_request_json", return_value={}),
+        ):
+            worker = threading.Thread(target=run_assignment)
+            worker.start()
+            self.assertTrue(entered.wait(1))
+            started = time.monotonic()
+            status = manager.status()
+            elapsed = time.monotonic() - started
+            release.set()
+            worker.join(2)
+
+        self.assertLess(elapsed, 0.5)
+        self.assertEqual(status["running"], 1)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(errors, [])
+
+    def test_managed_candidate_selection_fails_fast_when_all_matches_are_quarantined(self) -> None:
+        manager = ManagedMihomoManager()
+        manager._quarantine["sg-anytls-aw"] = (time.time() + 120, "TLS failure")
+        instance = SimpleNamespace(api_base="http://127.0.0.1:43000")
+        response = {
+            "proxies": {
+                "REGISTER": {"all": ["sg-anytls-aw", "us-anytls-aw"]},
+                "sg-anytls-aw": {},
+                "us-anytls-aw": {},
+            }
+        }
+
+        started = time.monotonic()
+        with patch.object(managed_mihomo_service, "_request_json", return_value=response):
+            with self.assertRaisesRegex(RuntimeError, "匹配节点均在隔离中"):
+                manager._candidate_names(
+                    instance,
+                    {"managed_mihomo": {"startup_timeout": 30}, "node_blacklist": []},
+                    name_filter="sg-anytls",
+                )
+
+        self.assertLess(time.monotonic() - started, 0.5)
+
     def test_managed_stop_recovers_verified_legacy_orphan(self) -> None:
         manager = ManagedMihomoManager()
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -401,7 +564,18 @@ proxies:
             result = manager._probe_selected_proxy(instance, "node-us")
         self.assertEqual(result["region"], "US")
         self.assertEqual(result["openai_status"], 302)
+        self.assertFalse(result["openai_restricted"])
         self.assertGreaterEqual(result["latency_ms"], 1)
+
+    def test_managed_probe_accepts_direct_403_for_nested_parent_transport(self) -> None:
+        manager = ManagedMihomoManager()
+        instance = SimpleNamespace(proxy_url="http://127.0.0.1:42000", fingerprint="test")
+        trace = SimpleNamespace(status_code=200, text="ip=127.0.0.1\nloc=SG\n")
+        openai = SimpleNamespace(status_code=403, text="")
+        with patch("services.managed_mihomo_service.curl_requests.get", side_effect=[trace, openai]):
+            result = manager._probe_selected_proxy(instance, "node-sg")
+        self.assertEqual(result["openai_status"], 403)
+        self.assertTrue(result["openai_restricted"])
 
     def test_registration_disallowed_is_not_misclassified_as_cloudflare(self) -> None:
         self.assertFalse(_is_cloudflare_blocked_error("cf-ray=abc code=registration_disallowed"))
@@ -460,6 +634,61 @@ proxies:
                 proxy_pool_store._fetch_text("https://subscriptions.example/list")
 
         response.read.assert_called_once_with(proxy_pool_store.MAX_SUBSCRIPTION_BYTES + 1)
+
+    def test_subscription_download_accepts_a_format_specific_user_agent(self) -> None:
+        response = MagicMock()
+        response.__enter__.return_value = response
+        response.__exit__.return_value = False
+        response.geturl.return_value = "https://subscriptions.example/list"
+        response.headers = {}
+        response.read.return_value = b"proxies: []"
+        opener = MagicMock()
+        opener.open.return_value = response
+
+        with (
+            patch.object(proxy_pool_store.socket, "getaddrinfo", return_value=[(2, 1, 6, "", ("93.184.216.34", 443))]),
+            patch.object(proxy_pool_store.urllib.request, "build_opener", return_value=opener),
+        ):
+            result = proxy_pool_store._fetch_text(
+                "https://subscriptions.example/list",
+                user_agent="Clash.Meta/test",
+            )
+
+        request = opener.open.call_args.args[0]
+        self.assertEqual(result, "proxies: []")
+        self.assertEqual(request.get_header("User-agent"), "Clash.Meta/test")
+
+    def test_managed_subscription_requests_clash_meta_format(self) -> None:
+        with patch.object(proxy_pool_store, "_fetch_text", return_value="proxies: []") as fetch:
+            result = managed_mihomo_service._fetch_subscription("https://subscriptions.example/list")
+
+        self.assertEqual(result, "proxies: []")
+        fetch.assert_called_once_with(
+            "https://subscriptions.example/list",
+            allow_private=False,
+            user_agent=managed_mihomo_service.SUBSCRIPTION_USER_AGENT,
+        )
+
+    def test_managed_subscription_can_read_clash_profile_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "clash-verge"
+            profile = root / "profiles" / "cached.yaml"
+            profile.parent.mkdir(parents=True)
+            profile.write_text("proxies: []\n", encoding="utf-8")
+            with patch.object(managed_mihomo_service, "_clash_profile_roots", return_value=[root.resolve()]):
+                result = managed_mihomo_service._fetch_subscription(profile.as_uri())
+
+        self.assertEqual(result, "proxies: []")
+
+    def test_managed_subscription_rejects_local_file_outside_clash_profiles(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "clash-verge"
+            root.mkdir()
+            outside = Path(temp_dir) / "outside.yaml"
+            outside.write_text("proxies: []\n", encoding="utf-8")
+            with patch.object(managed_mihomo_service, "_clash_profile_roots", return_value=[root.resolve()]):
+                with self.assertRaisesRegex(RuntimeError, "Clash profile directory"):
+                    managed_mihomo_service._fetch_subscription(outside.as_uri())
 
     def test_account_proxy_has_priority_over_pool_assignment(self) -> None:
         result = proxy_pool_store.assign_proxy(

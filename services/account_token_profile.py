@@ -74,6 +74,63 @@ def token_profile(account: dict[str, Any]) -> dict[str, Any]:
     refresh_family = _refresh_token_family(account.get("refresh_token"))
     has_access_token = bool(str(account.get("access_token") or "").strip())
     has_refresh_token = refresh_family != "missing"
+    platform = str(account.get("platform") or "openai").strip().lower()
+
+    if platform == "grok":
+        try:
+            expires_at = int(access_claims.get("exp") or account.get("token_expires_at") or 0)
+        except Exception:
+            expires_at = 0
+        access_unexpired = has_access_token and (not expires_at or expires_at > int(time.time()) + 30)
+        refresh_failed = bool(account.get("token_refresh_required")) or str(account.get("oauth_refresh_status") or "").strip().lower() in {
+            "refresh_token_expired",
+            "refresh_token_invalid",
+            "refresh_token_refresh_failed",
+            "token_invalid",
+            "auth_invalid",
+            "failed",
+        }
+        oauth_capable = access_unexpired and not refresh_failed
+        sub2api_healthy = bool(account.get("sub2api_account_id")) and str(account.get("sub2api_health_status") or "").lower() in {
+            "ok",
+            "alive",
+            "healthy",
+        }
+        available = not _unavailable(account)
+        finished = sub2api_healthy or (oauth_capable and available)
+        if sub2api_healthy:
+            warehouse_status = "healthy"
+        elif str(account.get("sub2api_import_status") or "").lower() in {"ok", "json_imported"} or account.get("sub2api_account_id"):
+            warehouse_status = "imported_unverified"
+        elif str(account.get("sub2api_import_status") or "").lower() == "failed":
+            warehouse_status = "failed"
+        else:
+            warehouse_status = "not_imported"
+        if oauth_capable and has_refresh_token:
+            oauth_status = "valid_refresh"
+        elif oauth_capable:
+            oauth_status = "valid_access_only"
+        elif has_access_token and expires_at and expires_at <= int(time.time()) + 30:
+            oauth_status = "expired_access"
+        elif refresh_failed:
+            oauth_status = "invalid_refresh"
+        else:
+            oauth_status = "missing"
+        return {
+            "oauth_capable": oauth_capable,
+            "oauth_token_status": oauth_status,
+            "oauth_client_id": client_id,
+            "oauth_client_kind": "grok",
+            "oauth_provenance_verified": True,
+            "refresh_token_kind": "grok_oauth_rt" if has_refresh_token else "missing",
+            "refresh_token_label": "Grok OAuth RT" if has_refresh_token else "无 Grok RT",
+            "sub2api_healthy": sub2api_healthy,
+            "warehouse_status": warehouse_status,
+            "finished_account": finished,
+            "finished_reason": "sub2api_healthy" if sub2api_healthy else "grok_oauth_token" if oauth_capable and available else "",
+            "needs_oauth": available and not oauth_capable and not sub2api_healthy,
+        }
+
     platform_access = has_access_token and OPENAI_API_AUDIENCE in audiences and client_id != CHATGPT_WEB_CLIENT_ID
     web_session = has_access_token and client_id == CHATGPT_WEB_CLIENT_ID
 

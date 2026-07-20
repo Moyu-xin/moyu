@@ -17,7 +17,7 @@ import time
 import urllib.parse
 import urllib.request
 import zipfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +35,7 @@ RUNTIME_ROOT = DATA_DIR / "managed_mihomo"
 DEFAULT_BINARY = RUNTIME_ROOT / "mihomo.exe"
 RELEASE_API = "https://api.github.com/repos/MetaCubeX/mihomo/releases/latest"
 SELECTOR = "REGISTER"
+SUBSCRIPTION_USER_AGENT = "Clash.Meta/1.19.10"
 METADATA_NODE_MARKERS = (
     "剩余流量",
     "流量剩余",
@@ -62,7 +63,16 @@ def _request_json(url: str, *, method: str = "GET", body: dict[str, Any] | None 
         headers["Content-Type"] = "application/json"
         payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
     request = urllib.request.Request(url, data=payload, headers=headers, method=method)
-    with urllib.request.urlopen(request, timeout=timeout) as response:
+    hostname = str(urllib.parse.urlparse(url).hostname or "").strip().lower()
+    if hostname in {"127.0.0.1", "localhost", "::1"}:
+        # urllib caches the Windows system proxy in its global opener. If the
+        # system proxy changes after startup, even loopback controller calls
+        # can be sent to that stale proxy and return HTTP 502.
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        response_context = opener.open(request, timeout=timeout)
+    else:
+        response_context = urllib.request.urlopen(request, timeout=timeout)
+    with response_context as response:
         data = response.read().decode("utf-8", errors="replace")
     parsed = json.loads(data or "{}")
     return parsed if isinstance(parsed, dict) else {}
@@ -82,8 +92,63 @@ def _decode_subscription(text: str) -> str:
     return raw
 
 
+def _clash_profile_roots() -> list[Path]:
+    appdata = Path(os.environ.get("APPDATA") or "")
+    local_appdata = Path(os.environ.get("LOCALAPPDATA") or "")
+    candidates = [
+        appdata / "io.github.clash-verge-rev.clash-verge-rev",
+        appdata / "clash_win",
+        local_appdata / "io.github.clash-verge-rev.clash-verge-rev",
+        local_appdata / "top.gydi.clashverge",
+    ]
+    roots: list[Path] = []
+    for candidate in candidates:
+        if not str(candidate).strip() or not candidate.exists():
+            continue
+        resolved = candidate.resolve()
+        if resolved not in roots:
+            roots.append(resolved)
+    return roots
+
+
+def _local_subscription_path(url: str) -> Path:
+    parsed = urllib.parse.urlsplit(str(url or "").strip())
+    if parsed.scheme.lower() != "file":
+        raise RuntimeError("Local subscription URL must use file scheme")
+    if parsed.netloc.lower() not in {"", "localhost"} or parsed.query or parsed.fragment:
+        raise RuntimeError("Local subscription URL is invalid")
+    raw_path = urllib.parse.unquote(parsed.path or "")
+    if os.name == "nt" and re.match(r"^/[a-zA-Z]:/", raw_path):
+        raw_path = raw_path[1:]
+    candidate = Path(raw_path)
+    if not candidate.is_absolute():
+        raise RuntimeError("Local subscription path must be absolute")
+    if candidate.suffix.lower() not in {".yaml", ".yml"}:
+        raise RuntimeError("Local subscription must be a YAML file")
+    try:
+        resolved = candidate.resolve(strict=True)
+    except OSError as error:
+        raise RuntimeError("Local Clash subscription cache does not exist") from error
+    if not resolved.is_file():
+        raise RuntimeError("Local Clash subscription cache is not a file")
+    roots = _clash_profile_roots()
+    if not any(resolved == root or resolved.is_relative_to(root) for root in roots):
+        raise RuntimeError("Local subscription must stay inside a Clash profile directory")
+    if resolved.stat().st_size > proxy_pool_store.MAX_SUBSCRIPTION_BYTES:
+        raise RuntimeError("Subscription response exceeds 5 MiB")
+    return resolved
+
+
 def _fetch_subscription(url: str, *, allow_private: bool = False) -> str:
-    return _decode_subscription(proxy_pool_store._fetch_text(url, allow_private=allow_private))
+    if urllib.parse.urlsplit(str(url or "").strip()).scheme.lower() == "file":
+        return _decode_subscription(_local_subscription_path(url).read_text(encoding="utf-8", errors="replace"))
+    return _decode_subscription(
+        proxy_pool_store._fetch_text(
+            url,
+            allow_private=allow_private,
+            user_agent=SUBSCRIPTION_USER_AGENT,
+        )
+    )
 
 
 def _subscription_proxies(subscription: dict[str, Any]) -> list[dict[str, Any]]:
@@ -265,6 +330,7 @@ class _ManagedInstance:
     log_handle: Any
     fingerprint: str
     selected: str = ""
+    assignment_lock: Any = field(default_factory=threading.RLock, repr=False)
 
     @property
     def proxy_url(self) -> str:
@@ -286,6 +352,7 @@ class ManagedMihomoManager:
         self._health_cache: dict[str, tuple[float, int]] = {}
         self._probe_cache: dict[str, tuple[float, dict[str, Any]]] = {}
         self._quarantine: dict[str, tuple[float, str]] = {}
+        self._purpose_quarantine: dict[tuple[str, str], tuple[float, str]] = {}
         self._last_error = ""
         self._last_started_at = ""
 
@@ -335,7 +402,12 @@ class ManagedMihomoManager:
     def status(self) -> dict[str, Any]:
         with self._lock:
             executable = DEFAULT_BINARY
+            purposes_by_slot = {
+                physical_slot: purpose
+                for (purpose, _logical_slot), physical_slot in self._purpose_slots.items()
+            }
             quarantined = self._active_quarantine_locked()
+            scoped_quarantined = dict(self._purpose_quarantine)
             instances = []
             for slot, instance in sorted(self._instances.items()):
                 selected_probe = {}
@@ -344,6 +416,7 @@ class ManagedMihomoManager:
                     selected_probe = dict(cached_probe[1]) if cached_probe else {}
                 instances.append({
                     "slot": slot + 1,
+                    "purpose": purposes_by_slot.get(slot, ""),
                     "running": instance.running(),
                     "pid": instance.process.pid,
                     "proxy_url": instance.proxy_url,
@@ -351,6 +424,7 @@ class ManagedMihomoManager:
                     "selected": instance.selected,
                     "region": selected_probe.get("region", ""),
                     "openai_status": selected_probe.get("openai_status", 0),
+                    "openai_restricted": bool(selected_probe.get("openai_restricted")),
                     "probe_latency_ms": selected_probe.get("latency_ms", 0),
                 })
             return {
@@ -368,6 +442,15 @@ class ManagedMihomoManager:
                         "reason": reason,
                     }
                     for name, (until, reason) in sorted(quarantined.items())
+                ] + [
+                    {
+                        "name": name,
+                        "purpose": purpose,
+                        "until": until,
+                        "remaining_seconds": max(0, int(until - time.time())),
+                        "reason": reason,
+                    }
+                    for (purpose, name), (until, reason) in sorted(scoped_quarantined.items())
                 ],
             }
 
@@ -379,13 +462,20 @@ class ManagedMihomoManager:
         if not name:
             return {"ok": False, "message": "缺少节点名称"}
         seconds = max(60, min(3600, int(quarantine_seconds or 900)))
+        purpose = str(assignment.get("purpose") or "").strip().lower()
         with self._lock:
-            until = self._quarantine_node_locked(name, str(reason or "运行时连接失败"), seconds)
+            until = self._quarantine_node_locked(
+                name,
+                str(reason or "运行时连接失败"),
+                seconds,
+                purpose=purpose,
+            )
             return {
                 "ok": True,
                 "name": name,
                 "until": until,
                 "remaining_seconds": seconds,
+                "purpose": purpose,
             }
 
     def assign(
@@ -407,8 +497,17 @@ class ManagedMihomoManager:
             instance = self._instances.get(physical_slot)
             if instance is None or not instance.running():
                 raise RuntimeError(f"托管 Mihomo 线程 {slot + 1} 未运行")
+
+        # Each physical slot is independent. Network waits must not hold the
+        # manager lock or all concurrent workflows and status reads serialize.
+        with instance.assignment_lock:
             exact_name = str(exact_node_name or "").strip()
-            candidates = self._candidate_names(instance, store, name_filter=exact_name or name_filter)
+            candidates = self._candidate_names(
+                instance,
+                store,
+                name_filter=exact_name or name_filter,
+                purpose=str(purpose or ""),
+            )
             if exact_name:
                 candidates = [name for name in candidates if name == exact_name]
             if not candidates:
@@ -451,11 +550,19 @@ class ManagedMihomoManager:
                         "probe_latency_ms": int(probe.get("latency_ms") or 0),
                         "region": str(probe.get("region") or ""),
                         "openai_status": int(probe.get("openai_status") or 0),
+                        "openai_restricted": bool(probe.get("openai_restricted")),
                     }
                 except Exception as error:
                     last_error = str(error)
                     if validate_node:
-                        self._quarantine_node_locked(name, last_error, 300)
+                        with self._lock:
+                            quarantine_seconds = 300 if "地区不支持" in last_error else 60
+                            self._quarantine_node_locked(
+                                name,
+                                last_error,
+                                quarantine_seconds,
+                                purpose=str(purpose or ""),
+                            )
                     delay = float(store.get("retry_delay") or 0)
                     if delay > 0:
                         time.sleep(delay)
@@ -522,17 +629,27 @@ class ManagedMihomoManager:
         latency_ms = max(1, int((time.time() - started_at) * 1000))
         target = curl_requests.get("https://auth.openai.com/", **common)
         status = int(target.status_code or 0)
-        if status in {403, 451} or status >= 500 or status <= 0:
+        if status == 451 or status >= 500 or status <= 0:
             raise RuntimeError(f"OpenAI 目标站预检失败：HTTP {status}")
         result = {
             "region": region or "UNKNOWN",
             "latency_ms": latency_ms,
             "openai_status": status,
+            # A direct 403 still proves the parent can reach OpenAI. Nested
+            # residential workflows perform their own final-egress precheck.
+            "openai_restricted": status == 403,
         }
         self._probe_cache[key] = (time.time(), result)
         return dict(result)
 
-    def _candidate_names(self, instance: _ManagedInstance, store: dict[str, Any], *, name_filter: str = "") -> list[str]:
+    def _candidate_names(
+        self,
+        instance: _ManagedInstance,
+        store: dict[str, Any],
+        *,
+        name_filter: str = "",
+        purpose: str = "",
+    ) -> list[str]:
         deadline = time.time() + max(5, int((store.get("managed_mihomo") or {}).get("startup_timeout") or 30))
         last_error = ""
         while time.time() < deadline:
@@ -541,13 +658,33 @@ class ManagedMihomoManager:
                 proxies = data.get("proxies") if isinstance(data.get("proxies"), dict) else {}
                 group = proxies.get(SELECTOR) if isinstance(proxies.get(SELECTOR), dict) else {}
                 names = [str(name) for name in group.get("all") or [] if not _is_metadata_node(str(name))]
+                if not names:
+                    last_error = f"{SELECTOR} 节点组仍为空"
+                    time.sleep(0.5)
+                    continue
                 normalized_filter = str(name_filter or "").strip().lower()
                 if normalized_filter:
                     names = [name for name in names if normalized_filter in name.lower()]
+                    if not names:
+                        raise RuntimeError(f"节点筛选器 '{name_filter}' 没有匹配订阅节点")
                 blacklist = [str(item).strip().lower() for item in store.get("node_blacklist") or [] if str(item).strip()]
                 names = [name for name in names if not any(term in name.lower() for term in blacklist)]
-                quarantined = self._active_quarantine_locked()
+                if not names:
+                    raise RuntimeError("匹配节点已全部被项目黑名单排除")
+                with self._lock:
+                    quarantined = self._active_quarantine_locked(purpose)
+                matched_count = len(names)
                 names = [name for name in names if name not in quarantined]
+                if not names:
+                    remaining = min(
+                        max(0, int(until - time.time()))
+                        for name, (until, _reason) in quarantined.items()
+                        if name in group.get("all", [])
+                    )
+                    filter_label = f"筛选器 '{name_filter}' 的" if normalized_filter else ""
+                    raise RuntimeError(
+                        f"{filter_label}{matched_count} 个匹配节点均在隔离中，最早约 {remaining} 秒后恢复"
+                    )
                 if bool(store.get("fastest_mode")):
                     def delay_for(name: str) -> int:
                         item = proxies.get(name) if isinstance(proxies.get(name), dict) else {}
@@ -557,25 +694,41 @@ class ManagedMihomoManager:
                     names.sort(key=delay_for)
                 if names:
                     return names
+            except RuntimeError:
+                raise
             except Exception as error:
                 last_error = str(error)
             time.sleep(0.5)
         raise RuntimeError(f"托管 Mihomo 节点尚未就绪：{last_error or '订阅可能仍在加载'}")
 
-    def _active_quarantine_locked(self) -> dict[str, tuple[float, str]]:
+    def _active_quarantine_locked(self, purpose: str = "") -> dict[str, tuple[float, str]]:
         now = time.time()
         for name, (until, _reason) in list(self._quarantine.items()):
             if until <= now:
                 self._quarantine.pop(name, None)
-        return dict(self._quarantine)
+        for key, (until, _reason) in list(self._purpose_quarantine.items()):
+            if until <= now:
+                self._purpose_quarantine.pop(key, None)
+        active = dict(self._quarantine)
+        normalized_purpose = str(purpose or "").strip().lower()
+        if normalized_purpose:
+            active.update({
+                name: value
+                for (scope, name), value in self._purpose_quarantine.items()
+                if scope == normalized_purpose
+            })
+        return active
 
-    def _quarantine_node_locked(self, name: str, reason: str, seconds: int) -> float:
+    def _quarantine_node_locked(self, name: str, reason: str, seconds: int, *, purpose: str = "") -> float:
         until = time.time() + max(60, int(seconds or 300))
         compact_reason = " ".join(str(reason or "节点连接失败").split())[:300]
-        current = self._quarantine.get(name)
+        normalized_purpose = str(purpose or "").strip().lower()
+        store = self._purpose_quarantine if normalized_purpose else self._quarantine
+        key: str | tuple[str, str] = (normalized_purpose, name) if normalized_purpose else name
+        current = store.get(key)
         if current and current[0] > until:
             until = current[0]
-        self._quarantine[name] = (until, compact_reason)
+        store[key] = (until, compact_reason)
         suffix = f":{name}"
         for key in [item for item in self._health_cache if item.endswith(suffix)]:
             self._health_cache.pop(key, None)

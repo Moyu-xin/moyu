@@ -38,17 +38,16 @@ class SentinelTokenGenerator:
         "language": "en-US",
         "languages": "en-US,en",
         "platform": "Win32",
-        "vendor": "Google Inc.",
+        "vendor": "",
         "vendorSub": "",
         "product": "Gecko",
-        "productSub": "20030107",
+        "productSub": "20100101",
         "appName": "Netscape",
         "hardwareConcurrency": "8",
-        "deviceMemory": "8",
         "maxTouchPoints": "0",
         "cookieEnabled": "true",
         "onLine": "true",
-        "doNotTrack": "null",
+        "doNotTrack": "1",
         "pdfViewerEnabled": "true",
     }
     DOCUMENT_KEYS = (
@@ -140,11 +139,10 @@ class SentinelTokenGenerator:
 
 # ── 默认 User-Agent 和 sec-ch-ua ──────────────────────────────
 DEFAULT_SENTINEL_USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/145.0.0.0 Safari/537.36"
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:145.0) "
+    "Gecko/20100101 Firefox/145.0"
 )
-DEFAULT_SENTINEL_SEC_CH_UA = '"Chromium";v="145", "Google Chrome";v="145", "Not/A)Brand";v="99"'
+DEFAULT_SENTINEL_SEC_CH_UA = ""
 
 _SDK_CACHE_LOCK = threading.Lock()
 _SDK_SOURCE_CACHE = ""
@@ -156,16 +154,22 @@ def _load_sdk_source(session: "Session", user_agent: str, sec_ch_ua: str) -> str
     with _SDK_CACHE_LOCK:
         if _SDK_SOURCE_CACHE:
             return _SDK_SOURCE_CACHE
+        headers = {
+            "Accept": "*/*",
+            "Referer": "https://auth.openai.com/",
+            "User-Agent": user_agent,
+        }
+        if sec_ch_ua:
+            headers.update(
+                {
+                    "sec-ch-ua": sec_ch_ua,
+                    "sec-ch-ua-mobile": "?0",
+                    "sec-ch-ua-platform": '"Windows"',
+                }
+            )
         resp = session.get(
             SentinelTokenGenerator.SCRIPT_URL,
-            headers={
-                "Accept": "*/*",
-                "Referer": "https://auth.openai.com/",
-                "User-Agent": user_agent,
-                "sec-ch-ua": sec_ch_ua,
-                "sec-ch-ua-mobile": "?0",
-                "sec-ch-ua-platform": '"Windows"',
-            },
+            headers=headers,
             timeout=30,
             verify=True,
         )
@@ -231,18 +235,24 @@ def build_sentinel_headers(
     ch_ua = sec_ch_ua or DEFAULT_SENTINEL_SEC_CH_UA
     generator = SentinelTokenGenerator(device_id, ua)
     requirements_proof = generator.generate_requirements_token()
+    headers = {
+        "Content-Type": "text/plain;charset=UTF-8",
+        "Referer": "https://sentinel.openai.com/backend-api/sentinel/frame.html?sv=20260219f9f6",
+        "Origin": "https://sentinel.openai.com",
+        "User-Agent": ua,
+    }
+    if ch_ua:
+        headers.update(
+            {
+                "sec-ch-ua": ch_ua,
+                "sec-ch-ua-mobile": "?0",
+                "sec-ch-ua-platform": '"Windows"',
+            }
+        )
     resp = session.post(
         "https://sentinel.openai.com/backend-api/sentinel/req",
         data=json.dumps({"p": requirements_proof, "id": device_id, "flow": flow}),
-        headers={
-            "Content-Type": "text/plain;charset=UTF-8",
-            "Referer": "https://sentinel.openai.com/backend-api/sentinel/frame.html?sv=20260219f9f6",
-            "Origin": "https://sentinel.openai.com",
-            "User-Agent": ua,
-            "sec-ch-ua": ch_ua,
-            "sec-ch-ua-mobile": "?0",
-            "sec-ch-ua-platform": '"Windows"',
-        },
+        headers=headers,
         timeout=20,
         verify=True,
     )

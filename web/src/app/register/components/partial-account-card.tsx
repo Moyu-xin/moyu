@@ -150,6 +150,10 @@ function healthText(value?: string) {
   if (status === "refresh_token_missing") return "缺 RT";
   if (["refresh_token_invalid", "refresh_token_expired"].includes(status)) return "RT 失效";
   if (status === "refresh_token_refresh_failed") return "RT 刷新失败";
+  if (status === "browser_check_required") return "需浏览器测活";
+  if (status === "missing_registration_proxy") return "缺注册节点";
+  if (status === "missing_token") return "缺少 Token";
+  if (status === "missing_sub2api_id") return "缺 Sub2API ID";
   if (["network_error", "proxy_error", "timeout", "failed"].includes(status)) return "检测失败";
   if (["cloudflare_blocked", "region_blocked", "rate_limited", "blocked"].includes(status)) return "请求受阻";
   return "未检测";
@@ -159,6 +163,7 @@ function healthVariant(value?: string): "success" | "secondary" | "danger" | "ou
   const status = String(value || "unknown").toLowerCase();
   if (["ok", "alive", "healthy"].includes(status)) return "success";
   if (["banned", "dead", "disabled", "token_invalid", "token_expired", "auth_invalid", "invalid", "refresh_token_invalid", "refresh_token_expired"].includes(status)) return "danger";
+  if (["browser_check_required", "missing_registration_proxy", "missing_token", "missing_sub2api_id"].includes(status)) return "info";
   if (["network_error", "proxy_error", "timeout", "failed", "refresh_token_missing", "refresh_token_refresh_failed"].includes(status)) return "warning";
   if (["cloudflare_blocked", "region_blocked", "rate_limited", "blocked"].includes(status)) return "info";
   return "outline";
@@ -256,6 +261,7 @@ function jsonFileName(item: PartialAccountItem) {
 
 export function PartialAccountCard({ active = true }: { active?: boolean }) {
   const loadedRef = useRef(false);
+  const fullPoolLoadedRef = useRef(false);
   const [pool, setPool] = useState<PartialAccountPool | null>(null);
   const [healthState, setHealthState] = useState<PartialAccountHealthState | null>(null);
   const [loading, setLoading] = useState(true);
@@ -315,11 +321,7 @@ export function PartialAccountCard({ active = true }: { active?: boolean }) {
         : [null, await healthPromise] as const;
       if (poolData) {
         applyPool(poolData.partial_account_pool);
-        if (preview && poolData.partial_account_pool.page_info?.partial) {
-          window.setTimeout(() => {
-            void fetchPartialAccountPool({ force: true }).then((fullData) => applyPool(fullData.partial_account_pool)).catch(() => undefined);
-          }, 600);
-        }
+        fullPoolLoadedRef.current = !poolData.partial_account_pool.page_info?.partial;
       }
       setHealthState(healthData.partial_health);
       if (syncDraft || !scheduleDirty.current) syncScheduleSettings(healthData.partial_health);
@@ -336,7 +338,9 @@ export function PartialAccountCard({ active = true }: { active?: boolean }) {
     if (firstLoad) void load(false, true, true, true).finally(() => { loadedRef.current = true; });
     else setLoading(false);
     const healthTimer = window.setInterval(() => void load(true, false, false), 5000);
-    const poolTimer = window.setInterval(() => void load(true, false, true), 20000);
+    const poolTimer = window.setInterval(() => {
+      if (!fullPoolLoadedRef.current) void load(true, false, true, true);
+    }, 30000);
     return () => {
       window.clearInterval(healthTimer);
       window.clearInterval(poolTimer);
@@ -529,9 +533,10 @@ export function PartialAccountCard({ active = true }: { active?: boolean }) {
       applyPool(data.partial_health.partial_account_pool);
       const stats = data.partial_health.stats;
       const label = mode === "refresh_type" ? "类型刷新" : refreshQuota ? "测活和额度同步" : "测活";
-      const summary = `${label}完成：存活 ${stats.alive}，失效 ${stats.dead}，失败 ${stats.failed}`;
-      appendLog(summary, stats.failed ? "warning" : "success");
-      toast.success(summary);
+      const summary = `${label}完成：存活 ${stats.alive}，失效 ${stats.dead}，无法检测 ${stats.unverifiable || 0}，失败 ${stats.failed}`;
+      const hasIssues = Boolean(stats.dead || stats.unverifiable || stats.failed);
+      appendLog(summary, hasIssues ? "warning" : "success");
+      toast[hasIssues ? "warning" : "success"](summary);
     } catch (error) {
       const message = error instanceof Error ? error.message : "半成品测活失败";
       appendLog(message, "error");
@@ -906,7 +911,7 @@ export function PartialAccountCard({ active = true }: { active?: boolean }) {
           </div>
           <div className="mt-3 flex flex-wrap gap-x-5 gap-y-1 text-xs text-slate-500">
             <span>下次执行：{formatTime(healthState?.next_scheduled_run_at)}</span>
-            <span>上次结果：存活 {scheduledStats.alive || 0} / 失效 {scheduledStats.dead || 0} / 失败 {scheduledStats.failed || 0}</span>
+            <span>上次结果：存活 {scheduledStats.alive || 0} / 失效 {scheduledStats.dead || 0} / 无法检测 {scheduledStats.unverifiable || 0} / 失败 {scheduledStats.failed || 0}</span>
             {healthState?.last_error ? <span className="text-red-600">调度错误：{healthState.last_error}</span> : null}
           </div>
         </div>
@@ -919,7 +924,7 @@ export function PartialAccountCard({ active = true }: { active?: boolean }) {
                 <CardDescription>网页注册已完成、尚待 OAuth 或仓库入库的账号。</CardDescription>
               </div>
               <div className="flex flex-wrap gap-2">
-                <Button variant="outline" onClick={() => void load()} disabled={saving}><RefreshCw className={`size-4 ${loading ? "animate-spin" : ""}`} />刷新</Button>
+                <Button variant="outline" onClick={() => void load()} disabled={saving}><RefreshCw className={`size-4 ${loading ? "animate-spin" : ""}`} />{pool?.page_info?.partial ? `加载全部（共 ${pool.page_info.total}）` : "刷新"}</Button>
                 <Button variant="outline" onClick={() => exportJson()} disabled={!filtered.length}><Download className="size-4" />导出筛选 JSON</Button>
                 <Button variant="outline" onClick={() => exportCredentials()} disabled={!filtered.length}><Clipboard className="size-4" />导出账号密码</Button>
                 <Button variant="outline" className="border-amber-200 text-amber-700" onClick={() => void prune()} disabled={saving || !stats.health_dead}><Trash2 className="size-4" />清理失效</Button>

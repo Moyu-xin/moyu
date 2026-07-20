@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { Activity, Ban, Database, Gauge, LoaderCircle, Play, Power, RefreshCw, Search, ServerCog, Trash2, Warehouse } from "lucide-react";
+import { Activity, Ban, Database, Gauge, Images, LoaderCircle, Play, Power, RefreshCw, Search, ServerCog, Trash2, Warehouse } from "lucide-react";
 import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
@@ -11,22 +11,27 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import {
   actOnCpaAccounts,
+  actOnGrok2ApiAccounts,
   actOnSub2ApiAccounts,
   fetchCpaAccounts,
   fetchCpaConfig,
+  fetchGrok2ApiAccounts,
+  fetchGrok2ApiConfig,
   fetchSub2ApiAccounts,
   fetchSub2ApiAccountsUsage,
   fetchSub2ApiConfig,
   fetchSub2ApiGroups,
+  refreshGrok2ApiAccounts,
   testCpaAccounts,
   testSub2ApiAccounts,
   updateCpaConfig,
   updateSub2ApiConfig,
   type CpaConfig,
+  type Grok2ApiConfig,
   type Sub2ApiConfig,
 } from "@/lib/api";
 
-type WarehouseKind = "sub2api" | "cpa";
+type WarehouseKind = "sub2api" | "cpa" | "grok2api";
 type Row = Record<string, unknown>;
 
 function formatTime(value: unknown) {
@@ -40,7 +45,7 @@ function record(value: unknown): Record<string, unknown> {
 }
 
 function idOf(kind: WarehouseKind, item: Row) {
-  return kind === "sub2api" ? String(item.id || item.account_id || "") : String(item.name || item.id || "");
+  return kind === "cpa" ? String(item.name || item.id || "") : String(item.id || item.account_id || "");
 }
 
 function emailOf(item: Row) {
@@ -50,6 +55,11 @@ function emailOf(item: Row) {
 
 function statusOf(kind: WarehouseKind, item: Row) {
   if (kind === "cpa") return String(item.warehouse_status || (item.disabled ? "disabled" : "active"));
+  if (kind === "grok2api") {
+    if (item.enabled === false) return "disabled";
+    const authStatus = String(item.authStatus || "active").toLowerCase();
+    return ["active", "available", "ready"].includes(authStatus) ? "active" : authStatus;
+  }
   const status = String(item.status || (item.disabled ? "inactive" : "active")).toLowerCase();
   return status === "inactive" ? "disabled" : status;
 }
@@ -60,6 +70,7 @@ function planOf(kind: WarehouseKind, item: Row) {
   const health = record(item.warehouse_health);
   const usage = record(health.usage);
   if (kind === "cpa") return String(idToken.plan_type || usage.plan_type || item.account_type || item.provider || "Codex");
+  if (kind === "grok2api") return String(item.webTier || item.provider || "grok_web");
   return String(credentials.plan_type || item.plan_type || item.platform || "OpenAI");
 }
 
@@ -71,6 +82,12 @@ function quotaOf(kind: WarehouseKind, item: Row) {
     const code = usage.code_review_remaining_percent;
     if (remaining !== undefined && remaining !== null) return `周 ${Number(remaining).toFixed(1)}%${code !== undefined && code !== null ? ` / 审查 ${Number(code).toFixed(1)}%` : ""}`;
     return health.status === "quota_exhausted" ? "额度耗尽" : "未读取";
+  }
+  if (kind === "grok2api") {
+    const quota = record(item.quota);
+    if (quota.remaining !== undefined && quota.limit !== undefined) return `${Number(quota.remaining).toFixed(0)} / ${Number(quota.limit).toFixed(0)}`;
+    if (quota.usagePercent !== undefined) return `已用 ${Number(quota.usagePercent).toFixed(1)}%`;
+    return "未读取";
   }
   const data = record(usage.data);
   const five = record(data.five_hour);
@@ -98,6 +115,7 @@ export function WarehouseManagerCard() {
   const [active, setActive] = useState<WarehouseKind>("sub2api");
   const [subConfig, setSubConfig] = useState<Sub2ApiConfig | null>(null);
   const [cpaConfig, setCpaConfig] = useState<CpaConfig | null>(null);
+  const [grok2apiConfig, setGrok2ApiConfig] = useState<Grok2ApiConfig | null>(null);
   const [groups, setGroups] = useState<Row[]>([]);
   const [items, setItems] = useState<Row[]>([]);
   const [stats, setStats] = useState<Record<string, number>>({});
@@ -112,17 +130,18 @@ export function WarehouseManagerCard() {
   const [busy, setBusy] = useState("");
   const [lastResult, setLastResult] = useState<Record<string, unknown> | null>(null);
 
-  const config = active === "sub2api" ? subConfig : cpaConfig;
+  const config = active === "sub2api" ? subConfig : active === "cpa" ? cpaConfig : grok2apiConfig;
   const enabled = Boolean(config?.enabled);
   const pageIds = useMemo(() => items.map((item) => idOf(active, item)).filter(Boolean), [active, items]);
   const allPageSelected = pageIds.length > 0 && pageIds.every((id) => selected.includes(id));
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
 
   const loadConfigs = async () => {
-    const [subData, cpaData] = await Promise.all([fetchSub2ApiConfig(), fetchCpaConfig()]);
+    const [subData, cpaData, grok2apiData] = await Promise.all([fetchSub2ApiConfig(), fetchCpaConfig(), fetchGrok2ApiConfig()]);
     setSubConfig(subData.sub2api_config);
     setCpaConfig(cpaData.cpa_config);
-    return { sub2api: subData.sub2api_config, cpa: cpaData.cpa_config };
+    setGrok2ApiConfig(grok2apiData.grok2api_config);
+    return { sub2api: subData.sub2api_config, cpa: cpaData.cpa_config, grok2api: grok2apiData.grok2api_config };
   };
 
   const loadGroups = async () => {
@@ -151,12 +170,18 @@ export function WarehouseManagerCard() {
         setTotal(Number(data.sub2api_accounts.total || 0));
         setStats({ total: Number(data.sub2api_accounts.total || 0) });
         setPage(Number(data.sub2api_accounts.page || nextPage));
-      } else {
+      } else if (kind === "cpa") {
         const data = await fetchCpaAccounts({ page: nextPage, pageSize: queryPageSize, search: querySearch, status: queryStatus });
         setItems((data.cpa_accounts.items || []) as Row[]);
         setTotal(Number(data.cpa_accounts.total || 0));
         setStats(data.cpa_accounts.stats || {});
         setPage(Number(data.cpa_accounts.page || nextPage));
+      } else {
+        const data = await fetchGrok2ApiAccounts({ page: nextPage, pageSize: queryPageSize, search: querySearch, status: queryStatus });
+        setItems((data.grok2api_accounts.items || []) as Row[]);
+        setTotal(Number(data.grok2api_accounts.total || 0));
+        setStats({ total: Number(data.grok2api_accounts.total || 0) });
+        setPage(Number(data.grok2api_accounts.page || nextPage));
       }
       setSelected([]);
     } catch (error) {
@@ -173,9 +198,11 @@ export function WarehouseManagerCard() {
       setLoading(true);
       try {
         const configs = await loadConfigs();
-        if (configs.sub2api.enabled) {
-          await loadGroups();
-          await loadAccounts(1, "sub2api");
+        const initialKind: WarehouseKind = configs.sub2api.enabled ? "sub2api" : configs.grok2api.enabled ? "grok2api" : "cpa";
+        setActive(initialKind);
+        if (configs[initialKind].enabled) {
+          if (initialKind === "sub2api") await loadGroups();
+          await loadAccounts(1, initialKind);
         }
       } catch (error) {
         toast.error(error instanceof Error ? error.message : "加载仓库管理失败");
@@ -193,7 +220,7 @@ export function WarehouseManagerCard() {
     setGroupId("");
     setSelected([]);
     setLastResult(null);
-    const nextConfig = kind === "sub2api" ? subConfig : cpaConfig;
+    const nextConfig = kind === "sub2api" ? subConfig : kind === "cpa" ? cpaConfig : grok2apiConfig;
     if (!nextConfig?.enabled) {
       setItems([]);
       setTotal(0);
@@ -217,10 +244,15 @@ export function WarehouseManagerCard() {
         const data = await testSub2ApiAccounts({ account_ids: ids, concurrency: subConfig?.test_concurrency || 5 });
         setLastResult(data.sub2api_test);
         toast.success(`sub2api 测活完成：成功 ${Number(data.sub2api_test.success || 0)}，失败 ${Number(data.sub2api_test.fail || 0)}`);
-      } else {
+      } else if (active === "cpa") {
         const data = await testCpaAccounts(ids);
         setLastResult(data.cpa_test);
         toast.success(`CPA 测活完成：成功 ${Number(data.cpa_test.success || 0)}，失败 ${Number(data.cpa_test.fail || 0)}`);
+      } else {
+        if (!ids.length) return toast.warning("请先选择 grok2api 账号");
+        const data = await refreshGrok2ApiAccounts(ids);
+        setLastResult(data.grok2api_refresh);
+        toast.success(`grok2api 额度刷新完成：${Number(data.grok2api_refresh.succeeded || 0)}/${Number(data.grok2api_refresh.total || ids.length)}`);
       }
       await loadAccounts(page);
     } catch (error) {
@@ -238,10 +270,14 @@ export function WarehouseManagerCard() {
         const data = await fetchSub2ApiAccountsUsage(ids);
         setLastResult(data.sub2api_usage);
         toast.success(`额度读取完成：${Number(data.sub2api_usage.success || 0)}/${Number(data.sub2api_usage.total || 0)}`);
-      } else {
+      } else if (active === "cpa") {
         const data = await testCpaAccounts(ids);
         setLastResult(data.cpa_test);
         toast.success(`CPA 额度读取完成：${Number(data.cpa_test.success || 0)}/${Number(data.cpa_test.total || 0)}`);
+      } else {
+        const data = await refreshGrok2ApiAccounts(ids);
+        setLastResult(data.grok2api_refresh);
+        toast.success(`grok2api 额度刷新完成：${Number(data.grok2api_refresh.succeeded || 0)}/${Number(data.grok2api_refresh.total || ids.length)}`);
       }
       await loadAccounts(page);
     } catch (error) {
@@ -253,14 +289,16 @@ export function WarehouseManagerCard() {
 
   const runAction = async (action: "enable" | "disable" | "delete", ids = selected) => {
     if (!ids.length) return toast.warning("请先选择账号");
-    if (action === "delete" && !window.confirm(`确定删除选中的 ${ids.length} 个 ${active === "sub2api" ? "sub2api" : "CPA"} 账号？`)) return;
+    if (action === "delete" && !window.confirm(`确定删除选中的 ${ids.length} 个 ${active === "sub2api" ? "sub2api" : active === "cpa" ? "CPA" : "grok2api"} 账号？`)) return;
     setBusy(action);
     try {
       let result: Record<string, unknown>;
       if (active === "sub2api") {
         result = (await actOnSub2ApiAccounts(ids, action)).sub2api_action;
-      } else {
+      } else if (active === "cpa") {
         result = (await actOnCpaAccounts(ids, action)).cpa_action;
+      } else {
+        result = (await actOnGrok2ApiAccounts(ids, action)).grok2api_action;
       }
       setLastResult(result);
       toast.success(`${action === "delete" ? "删除" : action === "enable" ? "启用" : "停用"}完成：${Number(result.success || 0)}/${Number(result.total || 0)}`);
@@ -274,6 +312,8 @@ export function WarehouseManagerCard() {
 
   const toggleSchedule = async () => {
     if (!config) return;
+    if (active === "grok2api") return;
+    const wasScheduled = active === "sub2api" ? Boolean(subConfig?.scheduled_enabled) : Boolean(cpaConfig?.scheduled_enabled);
     setBusy("schedule");
     try {
       if (active === "sub2api") {
@@ -283,7 +323,7 @@ export function WarehouseManagerCard() {
         const data = await updateCpaConfig({ scheduled_enabled: !cpaConfig?.scheduled_enabled });
         setCpaConfig(data.cpa_config);
       }
-      toast.success(config.scheduled_enabled ? "已停止定期测活" : "已开启定期测活");
+      toast.success(wasScheduled ? "已停止定期测活" : "已开启定期测活");
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "更新定时测活失败");
     } finally {
@@ -293,7 +333,9 @@ export function WarehouseManagerCard() {
 
   const statCards = active === "cpa"
     ? [["总账号", stats.total ?? total], ["启用", stats.active ?? 0], ["停用", stats.disabled ?? 0], ["异常", stats.failed ?? 0], ["已测额度", stats.tested ?? 0]]
-    : [["筛选账号", total], ["当前页", items.length], ["已选择", selected.length], ["定期测活", subConfig?.scheduled_enabled ? "开启" : "关闭"], ["巡检间隔", `${subConfig?.check_interval_minutes || 60} 分`]];
+    : active === "grok2api"
+      ? [["Web SSO 账号", total], ["当前页", items.length], ["已选择", selected.length], ["Provider", "grok_web"], ["能力", "Imagine"]]
+      : [["筛选账号", total], ["当前页", items.length], ["已选择", selected.length], ["定期测活", subConfig?.scheduled_enabled ? "开启" : "关闭"], ["巡检间隔", `${subConfig?.check_interval_minutes || 60} 分`]];
 
   return (
     <Card className="overflow-hidden">
@@ -301,17 +343,18 @@ export function WarehouseManagerCard() {
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
             <CardTitle className="flex items-center gap-2 text-xl text-slate-950"><BoxesIcon /><span>中转仓库管理</span></CardTitle>
-            <CardDescription className="mt-2 text-slate-600">管理能力统一，账号池仍按 sub2api 与 CPA 分开查询、分开操作。</CardDescription>
+            <CardDescription className="mt-2 text-slate-600">管理能力统一，账号池仍按 sub2api、CPA 与 grok2api 分开查询和操作。</CardDescription>
           </div>
           <div className="flex border border-slate-200 bg-slate-50 p-1">
             <Button variant={active === "sub2api" ? "default" : "ghost"} className={`h-9 ${active === "sub2api" ? "bg-emerald-600 text-white hover:bg-emerald-700" : "text-slate-600"}`} onClick={() => void switchWarehouse("sub2api")}><Database className="size-4" />sub2api</Button>
             <Button variant={active === "cpa" ? "default" : "ghost"} className={`h-9 ${active === "cpa" ? "bg-emerald-600 text-white hover:bg-emerald-700" : "text-slate-600"}`} onClick={() => void switchWarehouse("cpa")}><ServerCog className="size-4" />CPA</Button>
+            <Button variant={active === "grok2api" ? "default" : "ghost"} className={`h-9 ${active === "grok2api" ? "bg-emerald-600 text-white hover:bg-emerald-700" : "text-slate-600"}`} onClick={() => void switchWarehouse("grok2api")}><Images className="size-4" />grok2api</Button>
           </div>
         </div>
       </CardHeader>
       <CardContent className="space-y-4 p-5">
         {!enabled ? (
-          <div className="border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">当前 {active === "sub2api" ? "sub2api" : "CPA"} 仓库未启用，请先在“中转仓库配置”中保存地址和凭据。</div>
+          <div className="border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">当前 {active === "sub2api" ? "sub2api" : active === "cpa" ? "CPA" : "grok2api"} 仓库未启用，请先在“中转仓库配置”中保存地址和凭据。</div>
         ) : null}
 
         <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-5">
@@ -329,7 +372,7 @@ export function WarehouseManagerCard() {
         <div className="flex flex-wrap items-center justify-between gap-2 border-y border-slate-200 py-3">
           <div className="text-xs text-slate-500">已选 {selected.length} 个；不选择账号时“一键测活”会检查当前仓库全部账号。</div>
           <div className="flex flex-wrap gap-2">
-            <Button variant="outline" className="h-9 bg-white" onClick={() => void toggleSchedule()} disabled={!enabled || Boolean(busy)}><Power className="size-4" />{config?.scheduled_enabled ? "停止定期测活" : "开启定期测活"}</Button>
+            {active !== "grok2api" ? <Button variant="outline" className="h-9 bg-white" onClick={() => void toggleSchedule()} disabled={!enabled || Boolean(busy)}><Power className="size-4" />{config && "scheduled_enabled" in config && config.scheduled_enabled ? "停止定期测活" : "开启定期测活"}</Button> : null}
             <Button variant="outline" className="h-9 bg-white" onClick={() => void runTest()} disabled={!enabled || Boolean(busy)}>{busy === "test" ? <LoaderCircle className="size-4 animate-spin" /> : <Activity className="size-4" />}一键测活</Button>
             <Button variant="outline" className="h-9 bg-white" onClick={() => void loadUsage()} disabled={!enabled || !selected.length || Boolean(busy)}>{busy === "usage" ? <LoaderCircle className="size-4 animate-spin" /> : <Gauge className="size-4" />}额度</Button>
             <Button variant="outline" className="h-9 bg-white" onClick={() => void runAction("enable")} disabled={!enabled || !selected.length || Boolean(busy)}><Play className="size-4" />启用</Button>
@@ -348,15 +391,15 @@ export function WarehouseManagerCard() {
                   const id = idOf(active, item);
                   const rowStatus = statusOf(active, item);
                   const health = record(item.warehouse_health);
-                  const healthStatus = healthOf(item);
+                  const healthStatus = active === "grok2api" ? String(item.authStatus || (item.enabled === false ? "disabled" : "active")).toLowerCase() : healthOf(item);
                   const isSelected = selected.includes(id);
                   return <tr key={id} className={isSelected ? "bg-emerald-50" : "bg-white hover:bg-slate-50"}>
                     <td className="border-r border-b border-slate-100 px-3 py-3"><Checkbox checked={isSelected} onCheckedChange={() => toggleOne(id)} /></td>
-                    <td className="border-r border-b border-slate-100 px-3 py-3"><div className="truncate font-mono text-xs font-semibold text-slate-950" title={emailOf(item)}>{emailOf(item)}</div><div className="mt-1 truncate font-mono text-[11px] text-slate-400" title={id}>{active === "sub2api" ? `ID ${id}` : id}</div></td>
+                    <td className="border-r border-b border-slate-100 px-3 py-3"><div className="truncate font-mono text-xs font-semibold text-slate-950" title={emailOf(item)}>{emailOf(item)}</div><div className="mt-1 truncate font-mono text-[11px] text-slate-400" title={id}>{active === "cpa" ? id : `ID ${id}`}</div></td>
                     <td className="border-r border-b border-slate-100 px-3 py-3"><div className="flex flex-wrap gap-1.5"><Badge variant={rowStatus === "active" ? "success" : rowStatus === "disabled" ? "secondary" : "danger"} className="rounded-md">{rowStatus}</Badge><Badge variant={healthVariant(healthStatus)} className="rounded-md">{healthStatus}</Badge></div></td>
                     <td className="border-r border-b border-slate-100 px-3 py-3"><Badge variant="outline" className="rounded-md">{planOf(active, item)}</Badge></td>
                     <td className="border-r border-b border-slate-100 px-3 py-3 text-xs font-semibold text-slate-700">{quotaOf(active, item)}</td>
-                    <td className="border-r border-b border-slate-100 px-3 py-3 text-xs text-slate-600"><div>{formatTime(health.tested_at || health.checked_at)}</div>{health.error ? <div className="mt-1 line-clamp-2 text-[11px] text-rose-600" title={String(health.error)}>{String(health.error)}</div> : null}</td>
+                    <td className="border-r border-b border-slate-100 px-3 py-3 text-xs text-slate-600"><div>{formatTime(active === "grok2api" ? item.webTierSyncedAt || item.lastUsedAt || item.createdAt : health.tested_at || health.checked_at)}</div>{active === "grok2api" && item.lastError ? <div className="mt-1 line-clamp-2 text-[11px] text-rose-600" title={String(item.lastError)}>{String(item.lastError)}</div> : health.error ? <div className="mt-1 line-clamp-2 text-[11px] text-rose-600" title={String(health.error)}>{String(health.error)}</div> : null}</td>
                     <td className="border-b border-slate-100 px-3 py-3"><div className="flex flex-wrap gap-1.5"><Button variant="outline" className="h-7 bg-white px-2 text-xs" onClick={() => void runTest([id])} disabled={Boolean(busy)}>测活</Button><Button variant="outline" className="h-7 bg-white px-2 text-xs" onClick={() => void loadUsage([id])} disabled={Boolean(busy)}>额度</Button><Button variant="outline" className="h-7 border-rose-200 bg-rose-50 px-2 text-xs text-rose-700" onClick={() => void runAction("delete", [id])} disabled={Boolean(busy)}>删除</Button></div></td>
                   </tr>;
                 })}

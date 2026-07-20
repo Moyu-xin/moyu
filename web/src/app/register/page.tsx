@@ -1,12 +1,13 @@
 "use client";
 
-import { useEffect, useRef, useState, type CSSProperties } from "react";
+import { memo, startTransition, useEffect, useRef, useState, type CSSProperties } from "react";
 import {
   Activity,
   BellRing,
   Boxes,
   CheckCircle2,
   Clock3,
+  CreditCard,
   GraduationCap,
   Link2,
   ListChecks,
@@ -14,11 +15,13 @@ import {
   Mail,
   Mails,
   Network,
+  PackageCheck,
   Play,
   Power,
   RefreshCw,
   RotateCcw,
   Save,
+  ScanLine,
   Settings,
   Square,
   Trash2,
@@ -32,25 +35,38 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { BrandMark } from "@/components/brand-mark";
 import webConfig from "@/constants/common-env";
-import { checkSystemGit, fetchVersion, prefetchManagementData, restartSystem, type RegisterConfig, type SystemGitStatus } from "@/lib/api";
+import { checkSystemGit, fetchSystemGitStatus, fetchVersion, prefetchManagementData, restartSystem, type RegisterConfig, type SystemGitStatus } from "@/lib/api";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 import { getStoredAuthKey } from "@/store/auth";
 
 import { AccountPoolCard } from "./components/account-pool-card";
+import { CaptchaConfigCard } from "./components/captcha-config-card";
 import { GarbageHealthCard } from "./components/garbage-health-card";
+import { GrokConfigCard } from "./components/grok-config-card";
 import { K12WorkspaceCard } from "./components/k12-workspace-card";
 import { MailboxPoolCard } from "./components/mailbox-pool-card";
 import { OutlookMailboxInventoryCard } from "./components/outlook-mailbox-inventory-card";
 import { PartialAccountCard } from "./components/partial-account-card";
+import { PaypalPaymentCard } from "./components/paypal-payment-card";
 import { PlusLinkCard } from "./components/plus-link-card";
 import { ProxyPoolCard } from "./components/proxy-pool-card";
 import { RegisterCard } from "./components/register-card";
+import { ShippingAccountCard } from "./components/shipping-account-card";
 import { SystemSettingsCard } from "./components/system-settings-card";
 import { WarehouseConfigCard } from "./components/warehouse-config-card";
 import { WarehouseManagerCard } from "./components/warehouse-manager-card";
 import { useSettingsStore } from "./store";
 
-type ManageSection = "register" | "proxy" | "mail" | "accounts" | "garbage" | "warehouse" | "k12" | "plus" | "system";
+const ResidentOutlookMailboxInventoryCard = memo(OutlookMailboxInventoryCard);
+const ResidentAccountPoolCard = memo(AccountPoolCard);
+const ResidentPartialAccountCard = memo(PartialAccountCard);
+const ResidentShippingAccountCard = memo(ShippingAccountCard);
+const ResidentPlusLinkCard = memo(PlusLinkCard);
+const ResidentPaypalPaymentCard = memo(PaypalPaymentCard);
+const ResidentWarehouseConfigCard = memo(WarehouseConfigCard);
+const ResidentWarehouseManagerCard = memo(WarehouseManagerCard);
+
+type ManageSection = "register" | "proxy" | "captcha" | "mail" | "accounts" | "shipping" | "garbage" | "warehouse" | "k12" | "plus" | "paypal" | "system";
 type MailView = "inventory" | "config";
 type AccountView = "inventory" | "partials";
 type WarehouseView = "config" | "management";
@@ -71,11 +87,14 @@ const sections: Array<{
 }> = [
   { key: "register", title: "注册", description: "注册参数与实时日志", detail: "从微软邮箱库存或动态邮箱提供商领取邮箱，完成后写入账号库存。", icon: UserPlus },
   { key: "proxy", title: "代理配置", description: "订阅、节点池、Mihomo", detail: "维护注册与测活使用的出口代理。", icon: Network },
+  { key: "captcha", title: "打码配置", description: "Solver 状态、并发与启停", detail: "管理 Grok Turnstile 打码方式、本地 Solver 浏览器池、并发和运行状态。", icon: ScanLine },
   { key: "mail", title: "邮箱", description: "库存与提供商配置", detail: "管理微软邮箱库存、分组、收件和令牌，并维护 Gmail、Cloudflare 等邮箱提供商。", icon: Mail },
   { key: "accounts", title: "账号", description: "成品与半成品库存", detail: "管理成品账号、半成品账号、OAuth、测活、额度以及中转仓库导入。", icon: Boxes },
+  { key: "shipping", title: "出货账号", description: "Grok 待出库库存", detail: "独立管理 Grok 出货账号，注册后自动同步商店，兑换时实时测活并出库。", icon: PackageCheck },
   { key: "garbage", title: "捡垃圾", description: "JSON / CPA / sub2api 扫描测活", detail: "扫描用户选择目录中的 GPT 账号 JSON，自动识别 CPA 与 sub2api 格式，批量筛出仍可用账号并输出报告。", icon: Trash2 },
   { key: "plus", title: "Plus 提链", description: "从库存或令牌提取 Plus 长链", detail: "可选择成品、半成品账号，或使用手动 Token / Session 执行 Plus 链接提取任务。", icon: Link2 },
-  { key: "warehouse", title: "中转仓库", description: "配置与账号管理", detail: "维护 sub2api、CPA 的连接和巡检策略，并查询管理远端账号。", icon: Warehouse },
+  { key: "paypal", title: "协议支付", description: "使用 Plus BA 执行 PayPal 协议", detail: "从 Plus 提链结果选择 BA，按对应国家协议完成 PayPal 授权。", icon: CreditCard },
+  { key: "warehouse", title: "中转仓库", description: "配置与账号管理", detail: "维护 sub2api、CPA、grok2api 的连接策略，并查询管理远端账号。", icon: Warehouse },
   { key: "k12", title: "K12 空间", description: "库存账号加入 K12", detail: "从账号库存挑选账号，批量加入 team 空间。", icon: GraduationCap },
   { key: "system", title: "系统设置", description: "监控、维护与版本更新", detail: "管理登录密钥、实时资源监控、日志缓存、Git 更新和项目维护。", icon: Settings },
 ];
@@ -170,6 +189,7 @@ function formatSeconds(value: unknown) {
 
 function flowModeText(mode: string) {
   if (mode === "k12") return "K12 模式";
+  if (mode === "grok") return "Grok 注册";
   return "Free 模式";
 }
 
@@ -219,6 +239,7 @@ function RuntimeControlBar() {
   const setThreads = useSettingsStore((state) => state.setRegisterThreads);
   const save = useSettingsStore((state) => state.saveRegister);
   const toggle = useSettingsStore((state) => state.toggleRegister);
+  const clearLogs = useSettingsStore((state) => state.clearRegisterLogs);
   const reset = useSettingsStore((state) => state.resetRegister);
   if (!config) return null;
 
@@ -286,9 +307,10 @@ function RuntimeControlBar() {
         <div className="grid grid-cols-2 gap-2 md:grid-cols-3 2xl:flex 2xl:items-end">
           <label className="space-y-1">
             <span className="text-[11px] font-medium text-slate-500">注册模式</span>
-            <select value={flowMode} onChange={(event) => setFlowMode(event.target.value as "free" | "k12")} disabled={isRunning} className="h-10 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm text-slate-900 outline-none focus-visible:border-emerald-500 focus-visible:ring-[3px] focus-visible:ring-emerald-100 disabled:opacity-60 2xl:w-[170px]">
+            <select value={flowMode} onChange={(event) => setFlowMode(event.target.value as "free" | "k12" | "grok")} disabled={isRunning} className="h-10 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm text-slate-900 outline-none focus-visible:border-emerald-500 focus-visible:ring-[3px] focus-visible:ring-emerald-100 disabled:opacity-60 2xl:w-[170px]">
               <option value="free">Free 模式</option>
               <option value="k12">K12 模式</option>
+              <option value="grok">Grok 注册</option>
             </select>
           </label>
           {flowMode === "free" ? (
@@ -302,7 +324,7 @@ function RuntimeControlBar() {
           ) : null}
           <label className="space-y-1">
             <span className="text-[11px] font-medium text-slate-500">目标模式</span>
-            <select value={targetMode} onChange={(event) => setTargetMode(event.target.value as "total" | "available" | "quota")} disabled={isRunning} className="h-10 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm text-slate-900 outline-none focus-visible:border-emerald-500 focus-visible:ring-[3px] focus-visible:ring-emerald-100 disabled:opacity-60 2xl:w-[132px]">
+            <select value={targetMode} onChange={(event) => setTargetMode(event.target.value as "total" | "available" | "quota")} disabled={isRunning || flowMode === "grok"} className="h-10 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm text-slate-900 outline-none focus-visible:border-emerald-500 focus-visible:ring-[3px] focus-visible:ring-emerald-100 disabled:opacity-60 2xl:w-[132px]">
               <option value="total">任务总数</option>
               <option value="available">可用账号</option>
               <option value="quota">剩余额度</option>
@@ -330,12 +352,17 @@ function RuntimeControlBar() {
             {isSaving ? <LoaderCircle className="size-4 animate-spin" /> : isRunning ? <Square className="size-4" /> : <Play className="size-4" />}
             {isRunning ? "停止" : "启动"}
           </Button>
-          <Button variant="outline" size="icon" title="保存配置" aria-label="保存配置" className="size-10 rounded-xl border-slate-200 bg-white" onClick={() => void save()} disabled={isSaving || isRunning}>
-            <Save className="size-4" />
-          </Button>
-          <Button variant="outline" size="icon" title="清空日志并重置统计" aria-label="清空日志并重置统计" className="size-10 rounded-xl border-slate-200 bg-white" onClick={() => void reset()} disabled={isSaving || isRunning}>
-            <RotateCcw className="size-4" />
-          </Button>
+          <div className="flex items-end gap-2">
+            <Button variant="outline" size="icon" title="保存配置" aria-label="保存配置" className="size-10 rounded-xl border-slate-200 bg-white" onClick={() => void save()} disabled={isSaving || isRunning}>
+              <Save className="size-4" />
+            </Button>
+            <Button variant="outline" size="icon" title="清空运行日志" aria-label="清空运行日志" className="size-10 rounded-xl border-slate-200 bg-white text-rose-600 hover:bg-rose-50 hover:text-rose-700" onClick={() => void clearLogs()} disabled={isSaving}>
+              <Trash2 className="size-4" />
+            </Button>
+            <Button variant="outline" size="icon" title="重置统计和日志" aria-label="重置统计和日志" className="size-10 rounded-xl border-slate-200 bg-white" onClick={() => void reset()} disabled={isSaving || isRunning}>
+              <RotateCcw className="size-4" />
+            </Button>
+          </div>
         </div>
       </div>
     </section>
@@ -347,6 +374,11 @@ function RegisterPageContent() {
   const [mailView, setMailView] = useState<MailView>("inventory");
   const [accountView, setAccountView] = useState<AccountView>("inventory");
   const [warehouseView, setWarehouseView] = useState<WarehouseView>("config");
+  const [activitySection, setActivitySection] = useState<ManageSection>("register");
+  const [activityMailView, setActivityMailView] = useState<MailView>("inventory");
+  const [activityAccountView, setActivityAccountView] = useState<AccountView>("inventory");
+  const plusActivityRef = useRef(false);
+  const paypalActivityRef = useRef(false);
   const [residentViews, setResidentViews] = useState<Set<string>>(() => new Set(["register"]));
   const [sidebarWidth, setSidebarWidth] = useState(284);
   const [isResizing, setIsResizing] = useState(false);
@@ -366,7 +398,7 @@ function RegisterPageContent() {
     let mounted = true;
     const refreshGitStatus = async () => {
       try {
-        const { git } = await checkSystemGit();
+        const { git } = await fetchSystemGitStatus();
         if (mounted) setGitStatus(git);
       } catch {
         // Automatic update checks stay silent; manual checks still report errors.
@@ -402,14 +434,17 @@ function RegisterPageContent() {
   };
 
   const selectSection = (section: ManageSection) => {
+    plusActivityRef.current = section === "plus";
+    paypalActivityRef.current = section === "paypal";
     keepResident(section);
     setActiveSection(section);
+    startTransition(() => setActivitySection(section));
     storeLocation(section);
   };
 
-  const selectMailView = (view: MailView) => { keepResident("mail", view); setMailView(view); storeLocation("mail", view); };
-  const selectAccountView = (view: AccountView) => { keepResident("accounts", view); setAccountView(view); storeLocation("accounts", view); };
-  const selectWarehouseView = (view: WarehouseView) => { setWarehouseView(view); storeLocation("warehouse", view); };
+  const selectMailView = (view: MailView) => { keepResident("mail", view); setMailView(view); startTransition(() => setActivityMailView(view)); storeLocation("mail", view); };
+  const selectAccountView = (view: AccountView) => { keepResident("accounts", view); setAccountView(view); startTransition(() => setActivityAccountView(view)); storeLocation("accounts", view); };
+  const selectWarehouseView = (view: WarehouseView) => { keepResident("warehouse", view); setWarehouseView(view); storeLocation("warehouse", view); };
 
   useEffect(() => {
     try {
@@ -438,12 +473,21 @@ function RegisterPageContent() {
       const mapped = legacy[raw];
       const candidate = mapped?.section || sections.find((item) => item.key === raw)?.key;
       const requestedView = mapped?.view || url.searchParams.get("view") || (candidate ? window.localStorage.getItem(`register-${candidate}-view`) : "") || "";
-      if (candidate === "mail" && ["inventory", "config"].includes(requestedView)) setMailView(requestedView as MailView);
-      if (candidate === "accounts" && ["inventory", "partials"].includes(requestedView)) setAccountView(requestedView as AccountView);
+      if (candidate === "mail" && ["inventory", "config"].includes(requestedView)) {
+        setMailView(requestedView as MailView);
+        setActivityMailView(requestedView as MailView);
+      }
+      if (candidate === "accounts" && ["inventory", "partials"].includes(requestedView)) {
+        setAccountView(requestedView as AccountView);
+        setActivityAccountView(requestedView as AccountView);
+      }
       if (candidate === "warehouse" && ["config", "management"].includes(requestedView)) setWarehouseView(requestedView as WarehouseView);
       if (candidate) {
+        plusActivityRef.current = candidate === "plus";
+        paypalActivityRef.current = candidate === "paypal";
         keepResident(candidate, requestedView || currentView(candidate));
         setActiveSection(candidate);
+        setActivitySection(candidate);
       }
     } catch {
       // ignore browser state failures
@@ -516,7 +560,7 @@ function RegisterPageContent() {
             </div>
           </div>
 
-          <nav className="grid flex-1 grid-cols-4 gap-1.5 p-2 sm:grid-cols-9 lg:block lg:space-y-1.5 lg:overflow-y-auto lg:p-3" aria-label="注册机管理模块" role="tablist">
+          <nav className="grid flex-1 grid-cols-4 gap-1.5 p-2 sm:grid-cols-6 lg:block lg:space-y-1.5 lg:overflow-y-auto lg:p-3" aria-label="注册机管理模块" role="tablist">
             {sections.map((item) => {
               const Icon = item.icon;
               const isActive = activeSection === item.key;
@@ -605,18 +649,22 @@ function RegisterPageContent() {
 
           {activeSection === "mail" ? <ModuleViewTabs label="邮箱模块" value={mailView} onChange={selectMailView} onPrefetch={(view) => void prefetchManagementData("mail", view)} options={[{ value: "inventory", label: "微软邮箱库存", icon: Mails }, { value: "config", label: "邮箱配置", icon: Mail }]} /> : null}
           {activeSection === "accounts" ? <ModuleViewTabs label="账号模块" value={accountView} onChange={selectAccountView} onPrefetch={(view) => void prefetchManagementData("accounts", view)} options={[{ value: "inventory", label: "成品账号", icon: Boxes }, { value: "partials", label: "半成品账号", icon: Clock3 }]} /> : null}
-          {activeSection === "warehouse" ? <ModuleViewTabs label="中转仓库模块" value={warehouseView} onChange={selectWarehouseView} options={[{ value: "config", label: "仓库配置", icon: Warehouse }, { value: "management", label: "账号管理", icon: ListChecks }]} /> : null}
+          {activeSection === "warehouse" ? <ModuleViewTabs label="中转仓库模块" value={warehouseView} onChange={selectWarehouseView} onPrefetch={(view) => void prefetchManagementData("warehouse", view)} options={[{ value: "config", label: "仓库配置", icon: Warehouse }, { value: "management", label: "账号管理", icon: ListChecks }]} /> : null}
 
+          {activeSection === "register" ? <GrokConfigCard /> : null}
           {activeSection === "register" ? <RegisterCard /> : null}
           {activeSection === "proxy" ? <ProxyPoolCard /> : null}
-          {residentViews.has("mail:inventory") ? <div className={activeSection === "mail" && mailView === "inventory" ? "" : "hidden"}><OutlookMailboxInventoryCard active={activeSection === "mail" && mailView === "inventory"} /></div> : null}
+          {activeSection === "captcha" ? <CaptchaConfigCard /> : null}
+          {residentViews.has("mail:inventory") ? <div className={activeSection === "mail" && mailView === "inventory" ? "" : "hidden"}><ResidentOutlookMailboxInventoryCard active={activitySection === "mail" && activityMailView === "inventory"} /></div> : null}
           {activeSection === "mail" && mailView === "config" ? <MailboxPoolCard /> : null}
-          {residentViews.has("accounts:inventory") ? <div className={activeSection === "accounts" && accountView === "inventory" ? "" : "hidden"}><AccountPoolCard active={activeSection === "accounts" && accountView === "inventory"} /></div> : null}
-          {residentViews.has("accounts:partials") ? <div className={activeSection === "accounts" && accountView === "partials" ? "" : "hidden"}><PartialAccountCard active={activeSection === "accounts" && accountView === "partials"} /></div> : null}
+          {residentViews.has("accounts:inventory") ? <div className={activeSection === "accounts" && accountView === "inventory" ? "" : "hidden"}><ResidentAccountPoolCard active={activitySection === "accounts" && activityAccountView === "inventory"} /></div> : null}
+          {residentViews.has("accounts:partials") ? <div className={activeSection === "accounts" && accountView === "partials" ? "" : "hidden"}><ResidentPartialAccountCard active={activitySection === "accounts" && activityAccountView === "partials"} /></div> : null}
+          {residentViews.has("shipping") ? <div className={activeSection === "shipping" ? "" : "hidden"}><ResidentShippingAccountCard active={activitySection === "shipping"} /></div> : null}
           {activeSection === "garbage" ? <GarbageHealthCard /> : null}
-          {activeSection === "plus" ? <PlusLinkCard /> : null}
-          {activeSection === "warehouse" && warehouseView === "config" ? <WarehouseConfigCard /> : null}
-          {activeSection === "warehouse" && warehouseView === "management" ? <WarehouseManagerCard /> : null}
+          {residentViews.has("plus") ? <div className={activeSection === "plus" ? "" : "hidden"}><ResidentPlusLinkCard activityRef={plusActivityRef} /></div> : null}
+          {residentViews.has("paypal") ? <div className={activeSection === "paypal" ? "" : "hidden"}><ResidentPaypalPaymentCard activityRef={paypalActivityRef} /></div> : null}
+          {residentViews.has("warehouse:config") ? <div className={activeSection === "warehouse" && warehouseView === "config" ? "" : "hidden"}><ResidentWarehouseConfigCard /></div> : null}
+          {residentViews.has("warehouse:management") ? <div className={activeSection === "warehouse" && warehouseView === "management" ? "" : "hidden"}><ResidentWarehouseManagerCard /></div> : null}
           {activeSection === "k12" ? <K12WorkspaceCard /> : null}
           {activeSection === "system" ? <SystemSettingsCard /> : null}
         </section>

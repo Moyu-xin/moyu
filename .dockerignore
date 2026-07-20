@@ -5,6 +5,7 @@
 data
 logs
 runtime
+**/.runtime
 backups
 web/node_modules
 web/.next

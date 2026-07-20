@@ -15,6 +15,21 @@ $DataDir = Join-Path $Root "data"
 $LogDir = Join-Path $Root "logs"
 New-Item -ItemType Directory -Force -Path $DataDir, $LogDir | Out-Null
 
+$Grok2ApiTunnel = Join-Path $Root "scripts\ensure_grok2api_tunnel.ps1"
+if (Test-Path -LiteralPath $Grok2ApiTunnel) {
+    try {
+        & $Grok2ApiTunnel
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warning "grok2api SSH tunnel exited with code $LASTEXITCODE; continuing local service startup."
+        }
+    }
+    catch {
+        # Grok2API is optional. Keep the local service available while making
+        # the tunnel failure visible in the startup output and log file.
+        Write-Warning "grok2api SSH tunnel is unavailable; continuing local service startup: $($_.Exception.Message)"
+    }
+}
+
 $PidFile = Join-Path $DataDir "chatgpt2api-local.pid"
 $ServeScript = Join-Path $Root "serve_local.py"
 $Port = 8000

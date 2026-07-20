@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PayPal 协议支付网页端</title>
+  <link rel="stylesheet" href="/static/app.css?v=ui-wrap-1" />
+</head>
+<body>
+  <div class="shell">
+    <header class="hero">
+      <div>
+        <p class="eyebrow">Local Web Console</p>
+        <h1>PayPal 协议支付网页端</h1>
+        <p class="subtitle">填写 BA Token 后启动任务；可手动输入手机号，也可使用 SMSBower 自动接码。</p>
+      </div>
+      <div class="status-pill" id="serverStatus">连接中…</div>
+    </header>
+
+    <main class="grid">
+      <section class="card form-card">
+        <div class="section-title">
+          <h2>启动新任务</h2>
+          <span>后台自动生成资料</span>
+        </div>
+        <form id="runForm" autocomplete="off">
+          <label>
+            <span>BA Token</span>
+            <input id="baToken" name="baToken" required placeholder="BA-xxxxxxxxxxxxxxxxx" />
+          </label>
+          <label>
+            <span>手机号</span>
+            <input id="phone" name="phone" required placeholder="+5591980133818" />
+          </label>
+          <label class="check-row">
+            <input id="smsbowerEnabled" name="smsbowerEnabled" type="checkbox" />
+            <span>使用 SMSBower 自动接码</span>
+          </label>
+          <div class="form-row">
+            <label>
+              <span>最大换卡次数</span>
+              <input id="maxCardAttempts" name="maxCardAttempts" type="number" min="1" max="20" value="5" />
+            </label>
+            <label>
+              <span>整套流程重试</span>
+              <input id="maxFlowAttempts" name="maxFlowAttempts" type="number" min="1" max="5" value="1" />
+            </label>
+            <label>
+              <span>授权重试次数</span>
+              <input id="maxAuthorizeAttempts" name="maxAuthorizeAttempts" type="number" min="1" max="10" value="3" />
+            </label>
+            <label>
+              <span>换卡等待秒数</span>
+              <input id="cardRetryDelay" name="cardRetryDelay" type="number" min="0" max="60" step="0.5" value="6" />
+            </label>
+            <label>
+              <span>等待随机抖动</span>
+              <input id="cardRetryJitter" name="cardRetryJitter" type="number" min="0" max="30" step="0.5" value="2" />
+            </label>
+            <label class="check-row">
+              <input id="debug" name="debug" type="checkbox" />
+              <span>显示 DEBUG 日志</span>
+            </label>
+            <label class="check-row">
+              <input id="proxyEnabled" name="proxyEnabled" type="checkbox" />
+              <span>启用代理</span>
+            </label>
+            <label>
+              <span>代理来源</span>
+              <select id="proxyMode" name="proxyMode">
+                <option value="environment">环境变量代理（PAYPAL_PROXY_URL / PAYPAL_PROXY_POOL）</option>
+                <option value="custom">自定义链式代理 URL</option>
+              </select>
+            </label>
+            <label id="proxyUrlWrap" class="span-all hidden">
+              <span>链式代理 URL</span>
+              <input
+                id="proxyUrl"
+                name="proxyUrl"
+                placeholder="http://user:pass@host:port"
+                autocomplete="off"
+                autocapitalize="off"
+                spellcheck="false"
+              />
+            </label>
+            <label>
+              <span>浏览器指纹来源</span>
+              <select id="fingerprintSource" name="fingerprintSource">
+                <option value="headless" selected>本地 Headless</option>
+                <option value="roxy">Roxy 指纹浏览器</option>
+                <option value="random">程序随机生成</option>
+                <option value="auto">自动：优先 Roxy</option>
+              </select>
+            </label>
+            <label>
+              <span>DataDome 模式</span>
+              <select id="datadomeMode" name="datadomeMode">
+                <option value="headless" selected>本地 Headless</option>
+                <option value="roxy">Roxy 浏览器执行（同 Headless 逻辑）</option>
+                <option value="protocol">协议边缘模拟</option>
+                <option value="auto">自动：Roxy 失败回退</option>
+                <option value="off">关闭</option>
+              </select>
+            </label>
+            <label>
+              <span>MTR sealedResult</span>
+              <select id="mtrRuntime" name="mtrRuntime">
+                <option value="headless" selected>本地 Headless</option>
+                <option value="roxy">Roxy 浏览器执行 dfp.js（同 Headless 逻辑）</option>
+                <option value="python_generated">程序模板生成</option>
+                <option value="auto">自动：Roxy 失败回退</option>
+                <option value="block">严格阻断缺失</option>
+                <option value="off">关闭</option>
+              </select>
+            </label>
+            <label class="check-row">
+              <input id="recordTraffic" name="recordTraffic" type="checkbox" />
+              <span>测试：自动记录程序发包</span>
+            </label>
+            <label id="trafficDirWrap" class="span-all hidden">
+              <span>程序发包记录目录（可留空自动生成）</span>
+              <input
+                id="trafficDir"
+                name="trafficDir"
+                placeholder="/home/nonewhite/paypal-pay/captures/program-paypal-test"
+                autocomplete="off"
+                autocapitalize="off"
+                spellcheck="false"
+              />
+            </label>
+            <label id="compareRoxyWrap" class="span-all hidden">
+              <span>完成后自动对比 roxy 抓包目录（可选）</span>
+              <input
+                id="compareRoxyCapture"
+                name="compareRoxyCapture"
+                placeholder="/home/nonewhite/paypal-pay/captures/roxy-paypal-20260705-103548"
+                autocomplete="off"
+                autocapitalize="off"
+                spellcheck="false"
+              />
+            </label>
+          </div>
+          <button id="startBtn" class="primary" type="submit">开始执行</button>
+        </form>
+        <p class="hint">默认的本地 Headless 模式需要 Playwright：<code>pip install -r requirements-headless.txt &amp;&amp; python -m playwright install chromium</code>。未安装时可把上面三项切到程序随机生成、协议边缘模拟和程序模板生成。</p>
+        <p class="hint">手动模式执行到短信验证时会暂停等待输入；SMSBower 模式会自动取最低价 PayPal 巴西号码并接码。代理按每个任务生效。打开“自动记录程序发包”后会在 captures/program-paypal-* 下保存请求/响应，并可和 roxy 抓包自动生成差异报告。</p>
+      </section>
+
+      <section class="card jobs-card">
+        <div class="section-title">
+          <h2>任务列表</h2>
+          <button id="refreshJobs" class="ghost" type="button">刷新</button>
+        </div>
+        <div id="jobsList" class="jobs-list empty">暂无任务</div>
+      </section>
+
+      <section class="card current-card span-2">
+        <div class="section-title">
+          <div>
+            <h2>当前任务</h2>
+            <span id="currentMeta">未选择任务</span>
+          </div>
+          <div class="toolbar">
+            <button id="copyResult" class="ghost" type="button" disabled>复制结果</button>
+            <button id="clearCurrent" class="ghost" type="button">清空选择</button>
+          </div>
+        </div>
+
+        <div id="currentEmpty" class="empty-state">启动或选择一个任务后，这里会显示进度、验证码输入框、生成资料和执行结果。</div>
+
+        <div id="currentBody" class="current-body hidden">
+          <div class="progress-line">
+            <div>
+              <div id="jobStatus" class="job-status">queued</div>
+              <div id="jobStage" class="job-stage">排队中</div>
+            </div>
+            <div id="jobDuration" class="duration">0s</div>
+          </div>
+
+          <div id="otpPanel" class="otp-panel hidden">
+            <div>
+              <h3>需要输入验证码 / 新手机号</h3>
+              <p id="otpPrompt"></p>
+            </div>
+            <form id="otpForm" class="otp-form" autocomplete="off">
+              <input id="otpValue" placeholder="6位验证码或新手机号；q 退出" />
+              <button class="primary" type="submit">提交</button>
+            </form>
+          </div>
+
+          <div class="details-grid">
+            <div>
+              <h3>生成资料</h3>
+              <pre id="generatedBox" class="json-box">{}</pre>
+            </div>
+            <div>
+              <h3>结果</h3>
+              <pre id="resultBox" class="json-box">{}</pre>
+            </div>
+          </div>
+
+          <div class="logs-head">
+            <h3>实时日志</h3>
+            <div class="toolbar logs-toolbar">
+              <button id="copyLogs" class="ghost small-button" type="button" disabled>复制日志</button>
+              <label class="check-row small"><input id="autoScroll" type="checkbox" checked />自动滚动</label>
+            </div>
+          </div>
+          <div id="logsBox" class="logs-box" role="log" aria-live="polite"></div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+  <script src="/static/app.js?v=ui-wrap-1"></script>
+</body>
+</html>

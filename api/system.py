@@ -5,6 +5,7 @@ from pydantic import BaseModel, ConfigDict
 
 from api.support import require_admin, require_identity
 from services.config import config
+from services.sqlite_store import storage_status
 from services.system_maintenance_service import system_maintenance_service
 
 
@@ -57,7 +58,7 @@ def create_router(app_version: str) -> APIRouter:
         return {"version": app_version, "edition": "register-only"}
 
     @router.get("/api/system/overview")
-    async def get_overview(authorization: str | None = Header(default=None)):
+    def get_overview(authorization: str | None = Header(default=None)):
         require_admin(authorization)
         return {
             "app": {"name": "摸鱼机", "version": app_version},
@@ -67,11 +68,12 @@ def create_router(app_version: str) -> APIRouter:
             "cleanup": system_maintenance_service.cleanup_status(),
             "git": system_maintenance_service.git_status(),
             "restart": system_maintenance_service.restart_status(),
+            "storage": storage_status(),
             "hot_reload": True,
         }
 
     @router.get("/api/system/metrics")
-    async def get_metrics(authorization: str | None = Header(default=None)):
+    def get_metrics(authorization: str | None = Header(default=None)):
         require_admin(authorization)
         return {"memory": system_maintenance_service.memory_snapshot()}
 
@@ -119,7 +121,7 @@ def create_router(app_version: str) -> APIRouter:
         }
 
     @router.get("/api/system/git/status")
-    async def get_git_status(authorization: str | None = Header(default=None)):
+    def get_git_status(authorization: str | None = Header(default=None)):
         require_admin(authorization)
         return {"git": system_maintenance_service.git_status()}
 

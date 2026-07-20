@@ -10,6 +10,16 @@
 
 ## 干净发布
 
+本地开发和运行始终使用主项目目录，不要直接运行导出的干净包。生成带时间戳的 GitHub 审查包：
+
+```powershell
+.\scripts\export_github_package.ps1
+```
+
+脚本默认输出到主项目同级的 `moyu-release-packages/`，并用 `LATEST.txt` 指向最近一次导出。每个快照均不包含 Git 历史、运行配置、库存、日志、虚拟环境或构建缓存。实际提交和推送继续在长期维护的 `moyu-github-ready` Git 工作区完成，避免为每个快照重复建立仓库历史。
+
+底层白名单导出命令：
+
 ```powershell
 .\scripts\build_clean_release.ps1 -Destination D:\release\moyu-1.0
 ```

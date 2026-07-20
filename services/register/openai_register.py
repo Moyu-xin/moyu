@@ -62,12 +62,10 @@ platform_oauth_redirect_uri = "http://localhost:1455/auth/callback"
 platform_oauth_audience = "https://api.openai.com/v1"
 platform_auth0_client = "eyJuYW1lIjoiYXV0aDAtc3BhLWpzIiwidmVyc2lvbiI6IjEuMjEuMCJ9"
 user_agent = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/145.0.0.0 Safari/537.36"
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:133.0) "
+    "Gecko/20100101 Firefox/133.0"
 )
-sec_ch_ua = '"Google Chrome";v="145", "Not?A_Brand";v="8", "Chromium";v="145"'
-sec_ch_ua_full_version_list = '"Chromium";v="145.0.0.0", "Not:A-Brand";v="99.0.0.0", "Google Chrome";v="145.0.0.0"'
+sec_ch_ua = ""
 default_timeout = 30
 print_lock = threading.Lock()
 stats_lock = threading.Lock()
@@ -90,14 +88,6 @@ common_headers = {
     "origin": auth_base,
     "priority": "u=1, i",
     "sec-gpc": "1",
-    "sec-ch-ua": sec_ch_ua,
-    "sec-ch-ua-arch": '"x86_64"',
-    "sec-ch-ua-bitness": '"64"',
-    "sec-ch-ua-full-version-list": sec_ch_ua_full_version_list,
-    "sec-ch-ua-mobile": "?0",
-    "sec-ch-ua-model": '""',
-    "sec-ch-ua-platform": '"Windows"',
-    "sec-ch-ua-platform-version": '"10.0.0"',
     "sec-fetch-dest": "empty",
     "sec-fetch-mode": "cors",
     "sec-fetch-site": "same-origin",
@@ -112,14 +102,6 @@ navigate_headers = {
     "connection": "keep-alive",
     "dnt": "1",
     "sec-gpc": "1",
-    "sec-ch-ua": sec_ch_ua,
-    "sec-ch-ua-arch": '"x86_64"',
-    "sec-ch-ua-bitness": '"64"',
-    "sec-ch-ua-full-version-list": sec_ch_ua_full_version_list,
-    "sec-ch-ua-mobile": "?0",
-    "sec-ch-ua-model": '""',
-    "sec-ch-ua-platform": '"Windows"',
-    "sec-ch-ua-platform-version": '"10.0.0"',
     "sec-fetch-dest": "document",
     "sec-fetch-mode": "navigate",
     "sec-fetch-site": "same-origin",
@@ -428,7 +410,7 @@ def create_session(proxy: str = "") -> Any:
     kwargs = proxy_settings.build_session_kwargs(
         proxy=proxy,
         upstream=True,
-        impersonate="chrome145",
+        impersonate="firefox133",
         verify=proxy_settings.verify_tls(),
     )
     return requests.Session(**kwargs)
@@ -537,9 +519,6 @@ def request_platform_oauth_token(session: requests.Session, code: str, code_veri
         "pragma": "no-cache",
         "priority": "u=1, i",
         "referer": f"{platform_base}/",
-        "sec-ch-ua": sec_ch_ua,
-        "sec-ch-ua-mobile": "?0",
-        "sec-ch-ua-platform": '"Windows"',
         "sec-fetch-dest": "empty",
         "sec-fetch-mode": "cors",
         "sec-fetch-site": "same-site",
@@ -1533,9 +1512,6 @@ class PlatformRegistrar:
             "origin": chatgpt_base,
             "referer": f"{chatgpt_base}/",
             "oai-device-id": self.device_id,
-            "sec-ch-ua": sec_ch_ua,
-            "sec-ch-ua-mobile": "?0",
-            "sec-ch-ua-platform": '"Windows"',
             "sec-fetch-dest": "empty",
             "sec-fetch-mode": "cors",
             "sec-fetch-site": "same-origin",
@@ -2193,6 +2169,11 @@ def worker(index: int, proxy_override: str | None = None, proxy_assignment: dict
                     "registration_proxy_label": str(registration_proxy.get("label") or registration_proxy.get("node_name") or ""),
                 }
             )
+        batch_updates = {
+            "registration_batch_id": str(active.get("registration_batch_id") or ""),
+            "registration_batch_label": str(active.get("registration_batch_label") or ""),
+        }
+        result.update({key: value for key, value in batch_updates.items() if value})
         product_mode = str(active.get("product_mode") or "partial").strip().lower()
         if register_mode == "free" and product_mode == "partial":
             partial = _save_free_partial(index, result, reason="半成品模式未请求 sub2api OAuth", oauth_attempted=False)

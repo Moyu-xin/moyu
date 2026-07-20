@@ -41,6 +41,7 @@ git_cache/
 # Runtime logs
 logs/
 runtime/
+services/paypal_protocol/.runtime/
 *.log
 
 # Temporary test files
@@ -66,3 +67,5 @@ tampermonkey_capture.js
 loginwithpassword_*/
 logwithemailverifycode_*/
 test_batch_output/
+services/grok/vendor/sso_output/
+services/grok/vendor/oauth_output/

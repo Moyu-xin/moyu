@@ -416,6 +416,18 @@ def _extract_code(message: dict[str, Any]) -> str | None:
     content = f"{message.get('subject', '')}\n{message.get('text_content', '')}\n{message.get('html_content', '')}".strip()
     if not content:
         return None
+    # xAI currently uses uppercase alphanumeric codes such as ABC-123, while
+    # OpenAI uses six digits. Match the provider-specific shape first.
+    match = re.search(r"(?<![A-Z0-9])([A-Z0-9]{3}-[A-Z0-9]{3})(?![A-Z0-9])", content, re.I)
+    if match:
+        return match.group(1).upper()
+    match = re.search(
+        r"(?:verification\s+code(?:\s+is)?|verify\s+code(?:\s+is)?|code\s+is|your\s+code(?:\s+is)?|xAI\s+code(?:\s+is)?)\s*[:\-]?\s*([A-Z0-9]{6,8})(?![A-Z0-9])",
+        content,
+        re.I,
+    )
+    if match and not match.group(1).isdigit():
+        return match.group(1).upper()
     match = re.search(r"background-color:\s*#F3F3F3[^>]*>[\s\S]*?(\d{6})[\s\S]*?</p>", content, re.I)
     if match:
         return match.group(1)
@@ -427,6 +439,13 @@ def _extract_code(message: dict[str, Any]) -> str | None:
         if value and value != "177010":
             return value
     return None
+
+
+def _code_matches_register_mode(code: str, register_mode: str) -> bool:
+    mode = str(register_mode or "").strip().lower()
+    if mode in {"free", "free_wu", "k12"}:
+        return len(code) == 6 and code.isdigit()
+    return True
 
 
 def _extract_link(message: dict[str, Any], keyword: str = "") -> str | None:
@@ -1189,9 +1208,13 @@ class YydsMailProvider(BaseMailProvider):
         super().__init__(conf, str(entry.get("provider_ref") or ""))
         self.api_base = str(entry.get("api_base") or "https://maliapi.215.im/v1").rstrip("/")
         self.api_key = str(entry["api_key"]).strip()
-        self.domain = [str(item).strip() for item in (entry.get("domain") or []) if str(item).strip()]
+        raw_domains = entry.get("domain") or []
+        if isinstance(raw_domains, str):
+            raw_domains = raw_domains.replace("\n", ",").split(",")
+        self.domain = [str(item).strip().lstrip("@").strip(".") for item in raw_domains if str(item).strip()]
         self.subdomain = str(entry.get("subdomain") or "").strip()
         self.wildcard = bool(entry.get("wildcard"))
+        self.message_limit = 20
         self.session = _create_session(conf)
         self.session.headers.update({"User-Agent": conf["user_agent"], "Accept": "application/json", "Content-Type": "application/json"})
 
@@ -1199,7 +1222,15 @@ class YydsMailProvider(BaseMailProvider):
         headers = {"Authorization": f"Bearer {token}"} if token else {"X-API-Key": self.api_key}
         resp = self.session.request(method.upper(), f"{self.api_base}{path}", headers=headers, params=params, json=payload, timeout=self.conf["request_timeout"], verify=proxy_settings.verify_tls())
         if resp.status_code not in expected:
-            raise RuntimeError(f"YYDSMail 请求失败: {method} {path}, HTTP {resp.status_code}, body={resp.text[:300]}")
+            error_code = ""
+            try:
+                error_data = resp.json()
+                if isinstance(error_data, dict):
+                    error_code = str(error_data.get("errorCode") or error_data.get("error") or "")
+            except Exception:
+                pass
+            suffix = f", error={error_code}" if error_code else ""
+            raise RuntimeError(f"YYDSMail 请求失败: {method} {path}, HTTP {resp.status_code}{suffix}, body={resp.text[:300]}")
         if resp.status_code == 204:
             return {}
         data = resp.json()
@@ -1211,33 +1242,100 @@ class YydsMailProvider(BaseMailProvider):
     def _items(data):
         return data if isinstance(data, list) else data.get("items") or data.get("messages") or data.get("data") or []
 
+    def _catalog_domains(self) -> list[str]:
+        try:
+            data = self._request("GET", "/domains")
+        except RuntimeError:
+            return []
+        candidates: list[tuple[bool, str]] = []
+        for item in self._items(data):
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("domain") or item.get("name") or item.get("host") or "").strip().lstrip("@").strip(".")
+            if not name or item.get("isPublic") is False or item.get("public") is False:
+                continue
+            readiness_keys = ("receivingReady", "receiving_ready", "isReceivingReady", "mailReceivingReady", "canReceive", "mxReady", "isMxValid", "mxValid")
+            if any(item.get(key) is False for key in readiness_keys):
+                continue
+            status = str(item.get("status") or item.get("state") or item.get("receiveStatus") or "").strip().lower()
+            if status in {"pending", "initializing", "verifying", "not_ready", "not-ready", "disabled", "error", "failed"}:
+                continue
+            preferred = item.get("wildcardMxValid") is True or item.get("wildcard_mx_valid") is True
+            candidates.append((preferred, name))
+        return [name for _preferred, name in sorted(candidates, key=lambda item: not item[0])]
+
     def create_mailbox(self, username: str | None = None) -> dict[str, Any]:
-        payload = {"localPart": username or _random_mailbox_name()}
+        candidates: list[str] = []
         if self.domain:
-            payload["domain"] = _next_domain(self.domain)
-        if self.subdomain:
-            payload["subdomain"] = self.subdomain
-        data = self._request("POST", "/accounts/wildcard" if self.wildcard else "/accounts", payload=payload)
+            first = _next_domain(self.domain)
+            candidates = [first, *(domain for domain in self.domain if domain != first)]
+        for domain in self._catalog_domains():
+            if domain not in candidates:
+                candidates.append(domain)
+        candidates = candidates or [""]
+        data: dict[str, Any] = {}
+        last_error = ""
+        for domain in candidates:
+            payload = {"localPart": username or _random_mailbox_name()}
+            if domain:
+                payload["domain"] = domain
+            if self.subdomain:
+                payload["subdomain"] = self.subdomain
+            try:
+                result = self._request("POST", "/accounts/wildcard" if self.wildcard else "/accounts", payload=payload)
+                data = result if isinstance(result, dict) else {}
+                break
+            except RuntimeError as error:
+                last_error = str(error)
+                if "domain_not_receiving_ready" not in last_error:
+                    raise
+        if not data:
+            raise RuntimeError(last_error or "YYDSMail 创建邮箱失败")
         address = str(data.get("address") or data.get("email") or "").strip()
         token = str(data.get("token") or data.get("temp_token") or data.get("tempToken") or data.get("access_token") or "").strip()
-        if not address or not token:
-            raise RuntimeError("YYDSMail 缺少 address 或 token")
-        return {"provider": self.name, "provider_ref": self.provider_ref, "address": address, "token": token, "account_id": str(data.get("id") or "")}
+        account_id = str(data.get("id") or data.get("inboxId") or data.get("accountId") or "").strip()
+        if not address or not (token or account_id):
+            raise RuntimeError("YYDSMail 缺少 address 以及 token/account_id")
+        return {"provider": self.name, "provider_ref": self.provider_ref, "address": address, "token": token, "account_id": account_id}
 
     def fetch_latest_message(self, mailbox: dict[str, Any]) -> dict[str, Any] | None:
-        data = self._request("GET", "/messages", token=str(mailbox.get("token") or ""), params={"address": mailbox["address"]})
+        messages = self.fetch_recent_messages(mailbox)
+        return messages[0] if messages else None
+
+    def fetch_recent_messages(self, mailbox: dict[str, Any]) -> list[dict[str, Any]]:
+        address = str(mailbox.get("address") or "")
+        token = str(mailbox.get("token") or "")
+        account_id = str(mailbox.get("account_id") or "").strip()
+        data: Any = None
+        if account_id:
+            try:
+                data = self._request("GET", f"/inboxes/{account_id}/messages", params={"limit": self.message_limit})
+            except RuntimeError:
+                data = None
+        if data is None:
+            data = self._request("GET", "/messages", token=token, params={"address": address, "limit": self.message_limit})
         messages = [item for item in self._items(data) if isinstance(item, dict)]
-        if not messages:
-            return None
-        item = max(messages, key=lambda value: ((_parse_received_at(value.get("createdAt") or value.get("created_at") or value.get("receivedAt") or value.get("date") or value.get("timestamp")) or datetime.fromtimestamp(0, tz=timezone.utc)).timestamp(), str(value.get("id") or "")))
-        message_id = str(item.get("id") or item.get("message_id") or "").strip()
-        if message_id:
-            item = self._request("GET", f"/messages/{message_id}", token=str(mailbox.get("token") or ""), params={"address": mailbox["address"]})
-        text_content, html_content = _extract_content(item)
-        sender = item.get("from") or item.get("sender") or ""
-        if isinstance(sender, dict):
-            sender = sender.get("address") or sender.get("email") or sender.get("name") or ""
-        return {"provider": self.name, "mailbox": mailbox["address"], "message_id": message_id, "subject": str(item.get("subject") or ""), "sender": str(sender), "text_content": text_content, "html_content": html_content, "received_at": _parse_received_at(item.get("createdAt") or item.get("created_at") or item.get("receivedAt") or item.get("date") or item.get("timestamp")), "raw": item}
+        messages.sort(key=lambda value: ((_parse_received_at(value.get("createdAt") or value.get("created_at") or value.get("receivedAt") or value.get("date") or value.get("timestamp")) or datetime.fromtimestamp(0, tz=timezone.utc)).timestamp(), str(value.get("id") or "")), reverse=True)
+        normalized: list[dict[str, Any]] = []
+        for raw_item in messages[:self.message_limit]:
+            item = dict(raw_item)
+            message_id = str(item.get("id") or item.get("message_id") or item.get("messageId") or "").strip()
+            if message_id:
+                try:
+                    detail = self._request("GET", f"/messages/{message_id}", params={"address": address})
+                except RuntimeError:
+                    try:
+                        detail = self._request("GET", f"/messages/{message_id}", token=token, params={"address": address}) if token else {}
+                    except RuntimeError:
+                        detail = {}
+                if isinstance(detail, dict):
+                    item.update(detail.get("message") if isinstance(detail.get("message"), dict) else detail)
+            text_content, html_content = _extract_content(item)
+            sender = item.get("from") or item.get("sender") or ""
+            if isinstance(sender, dict):
+                sender = sender.get("address") or sender.get("email") or sender.get("name") or ""
+            normalized.append({"provider": self.name, "mailbox": address, "message_id": message_id, "subject": str(item.get("subject") or ""), "sender": str(sender), "text_content": text_content, "html_content": html_content, "received_at": _parse_received_at(item.get("createdAt") or item.get("created_at") or item.get("receivedAt") or item.get("date") or item.get("timestamp")), "to": item.get("to") or item.get("recipient") or address, "raw": item})
+        return normalized
 
     def close(self) -> None:
         self.session.close()
@@ -1578,7 +1676,11 @@ class OutlookTokenProvider(BaseMailProvider):
         if isinstance(sender, dict):
             address = sender.get("emailAddress") or {}
             if isinstance(address, dict):
-                return str(address.get("address") or address.get("name") or "")
+                name = str(address.get("name") or "").strip()
+                email = str(address.get("address") or "").strip()
+                if name and email and name.casefold() != email.casefold():
+                    return f"{name} <{email}>"
+                return email or name
         return ""
 
     def _normalize_graph_item(self, mailbox: dict[str, Any], item: dict[str, Any]) -> dict[str, Any]:
@@ -1592,7 +1694,9 @@ class OutlookTokenProvider(BaseMailProvider):
             if isinstance(recipient, dict):
                 email_address = recipient.get("emailAddress") or {}
                 if isinstance(email_address, dict):
-                    value = str(email_address.get("address") or "").strip()
+                    name = str(email_address.get("name") or "").strip()
+                    address = str(email_address.get("address") or "").strip()
+                    value = f"{name} <{address}>" if name and address and name.casefold() != address.casefold() else address or name
                     if value:
                         recipients.append(value)
         return {
@@ -1742,6 +1846,8 @@ class OutlookTokenProvider(BaseMailProvider):
                 if code:
                     seen_value.append(ref)
                     seen_refs.add(ref)
+                    if not _code_matches_register_mode(code, self.register_mode):
+                        continue
                     if code in seen_codes:
                         continue
                     seen_codes_value.append(code)
@@ -2041,17 +2147,42 @@ def _message_public_summary(message: dict[str, Any] | None) -> dict[str, Any] | 
         received_value = received_at.isoformat()
     else:
         received_value = str(received_at or "")
-    body = f"{message.get('text_content', '')}\n{message.get('html_content', '')}"
-    body = html.unescape(re.sub(r"<[^>]+>", " ", str(body or "")))
-    body_preview = " ".join(body.replace("\r", " ").replace("\n", " ").split())[:500]
+    text_content = str(message.get("text_content") or "").strip()
+    html_content = str(message.get("html_content") or "").strip()
+    if html_content:
+        html_text = re.sub(r"(?i)<br\s*/?>|</p\s*>|</div\s*>|</li\s*>", "\n", html_content)
+        body_text = html.unescape(re.sub(r"<[^>]+>", " ", html_text))
+    else:
+        body_text = text_content
+    body_text = "\n".join(line.strip() for line in body_text.replace("\r", "").split("\n") if line.strip())
+    body_text = re.sub(r"[ \t]+", " ", body_text).strip()[:20000]
+    body_preview = " ".join(body_text.replace("\n", " ").split())[:500]
+
+    def format_participant(value: Any) -> str:
+        if isinstance(value, dict):
+            nested = value.get("emailAddress")
+            if isinstance(nested, dict):
+                value = nested
+            name = str(value.get("name") or "").strip()
+            address = str(value.get("address") or value.get("email") or "").strip()
+            if name and address and name.casefold() != address.casefold():
+                return f"{name} <{address}>"
+            return address or name
+        return str(value or "").strip()
+
+    recipient_value = message.get("to") or message.get("recipients") or message.get("recipient") or []
+    recipient_values = recipient_value if isinstance(recipient_value, (list, tuple, set)) else [recipient_value]
+    recipients = [formatted for item in recipient_values if (formatted := format_participant(item))]
     return {
         "provider": str(message.get("provider") or ""),
         "mailbox": str(message.get("mailbox") or ""),
         "message_id": str(message.get("message_id") or ""),
         "subject": str(message.get("subject") or ""),
-        "sender": str(message.get("sender") or ""),
+        "sender": format_participant(message.get("sender")),
+        "recipients": recipients,
         "received_at": received_value,
         "body_preview": body_preview,
+        "body_text": body_text,
         "code": _extract_code(message) or "",
     }
 

@@ -1,0 +1,32 @@
+__pycache__/
+*.pyc
+
+# Runtime state / secrets
+cdk_bindings.json
+cdk_bindings.tmp
+cdk_keys.json
+cdk_keys.txt
+.env
+cache/
+var/
+debug/
+
+# Local captures often contain URLs/tokens and page data
+captures/
+
+# Ad-hoc archives / generated artifacts
+*.zip
+
+# Local backup files
+backups/
+
+# Analysis / reverse-engineering write-ups (not needed in production repo)
+/*_analysis.md
+/*_diff*.md
+/*_review.md
+/PAYPAL_*.md
+/*_report.md
+/manual_path_analysis.md
+/full_flow_analysis.md
+/protocol_payment_reconstruction.md
+/roxy_packet_manual_analysis/

@@ -4,6 +4,7 @@ import base64
 import hashlib
 import json
 import time
+import uuid
 from copy import deepcopy
 from datetime import datetime, timezone
 from threading import Lock
@@ -12,14 +13,16 @@ from typing import Any
 from services.atomic_json_store import read_json, write_json
 from services.account_token_profile import token_profile
 from services.config import DATA_DIR
+from services.sqlite_store import collection_page, document_signature
 
 REGISTERED_ACCOUNTS_FILE = DATA_DIR / "registered_accounts.json"
 _lock = Lock()
 _pool_cache_lock = Lock()
 _pool_cache: tuple[tuple[str, int, int], float, dict[str, Any]] | None = None
+_stats_cache: tuple[tuple[str, int, int], float, dict[str, Any]] | None = None
 
 
-SECRET_KEYS = {"access_token", "refresh_token", "id_token", "password", "session_token"}
+SECRET_KEYS = {"access_token", "refresh_token", "id_token", "password", "session_token", "sso", "sso_token"}
 TRANSIENT_KEYS = {
     "access_token_preview",
     "refresh_token_preview",
@@ -68,8 +71,11 @@ def account_identity_key(account: dict[str, Any]) -> str:
     email = _key(account.get("email"))
     if not email:
         return ""
+    platform = str(account.get("platform") or "openai").strip().lower()
+    platform_prefix = f"{platform}:" if platform and platform != "openai" else ""
     scope = _scope_id(account)
-    return f"{email}::{scope}" if scope else email
+    identity = f"{email}::{scope}" if scope else email
+    return platform_prefix + identity
 
 
 def account_inventory_id(account: dict[str, Any]) -> str:
@@ -108,11 +114,7 @@ def _save(items: list[dict[str, Any]]) -> None:
 
 
 def _source_signature() -> tuple[str, int, int]:
-    try:
-        stat = REGISTERED_ACCOUNTS_FILE.stat()
-        return str(REGISTERED_ACCOUNTS_FILE), int(stat.st_mtime_ns), int(stat.st_size)
-    except OSError:
-        return str(REGISTERED_ACCOUNTS_FILE), 0, 0
+    return document_signature(REGISTERED_ACCOUNTS_FILE)
 
 
 def _safe_json(value: Any) -> Any:
@@ -165,6 +167,18 @@ def _as_float(value: Any) -> float | None:
         return number
     except Exception:
         return None
+
+
+def _registration_batch_id(account: dict[str, Any]) -> str:
+    explicit = _first_non_empty(
+        account.get("registration_batch_id"),
+        account.get("registration_batch"),
+        account.get("batch_id"),
+    )
+    if explicit:
+        return explicit
+    created = str(account.get("registered_at") or account.get("created_at") or "").strip()
+    return f"legacy-{created[:10]}" if len(created) >= 10 else "legacy-unknown"
 
 
 def _token_context(access_token: object = "", id_token: object = "") -> dict[str, Any]:
@@ -249,11 +263,13 @@ def _normalize(account: dict[str, Any]) -> dict[str, Any] | None:
         return None
     now = _now()
     base: dict[str, Any] = {
+        "platform": str(account.get("platform") or "openai").strip().lower() or "openai",
         "email": email,
         "password": str(account.get("password") or ""),
         "access_token": access_token,
         "refresh_token": refresh_token,
         "id_token": id_token,
+        "sso_token": str(account.get("sso_token") or account.get("sso") or ""),
         "source_type": str(account.get("source_type") or account.get("source") or "web"),
         "created_at": str(account.get("created_at") or account.get("created") or now),
         "updated_at": str(account.get("updated_at") or account.get("updated") or now),
@@ -271,6 +287,11 @@ def _normalize(account: dict[str, Any]) -> dict[str, Any] | None:
         "health_code": account.get("health_code") if account.get("health_code") is not None else account.get("sub2api_health_code"),
         "health_error": str(account.get("health_error") or account.get("sub2api_last_error") or ""),
         "quota_status": str(account.get("quota_status") or "unknown"),
+        "registration_batch_id": _registration_batch_id(account),
+        "registration_batch_label": str(account.get("registration_batch_label") or ""),
+        "outbound_at": str(account.get("outbound_at") or ""),
+        "outbound_batch_id": str(account.get("outbound_batch_id") or ""),
+        "outbound_format": str(account.get("outbound_format") or ""),
     }
     for bool_key in ("k12_mode", "sub2api_disabled", "cpa_disabled"):
         if bool_key in account:
@@ -284,6 +305,7 @@ def _normalize(account: dict[str, Any]) -> dict[str, Any] | None:
         "organization_id", "group_ids", "tags", "rate_multiplier", "concurrency", "priority", "load_factor", "last_used_at", "proxy",
         "quota_model", "quota_reset_at", "quota_checked_at", "quota_source", "quota_details", "last_quota_error", "quota_error_status",
         "health_method", "health_latency_ms", "last_health_result", "deleted_reason",
+        "token_type", "token_endpoint", "base_url", "headers", "scope", "subject", "oauth_status", "oauth_error",
     }
     for key in passthrough:
         if key in account and account.get(key) not in (None, ""):
@@ -320,6 +342,8 @@ def _public(account: dict[str, Any], *, include_secret: bool = True) -> dict[str
     item["has_access_token"] = bool(item.get("access_token"))
     item["has_refresh_token"] = bool(item.get("refresh_token"))
     item["has_id_token"] = bool(item.get("id_token"))
+    item["sso_token_preview"] = _preview(item.get("sso_token"))
+    item["has_sso_token"] = bool(item.get("sso_token"))
     if not include_secret:
         for key in SECRET_KEYS:
             item.pop(key, None)
@@ -358,6 +382,7 @@ def _stats(accounts: list[dict[str, Any]]) -> dict[str, Any]:
     by_type: dict[str, int] = {}
     by_plan: dict[str, int] = {}
     by_health: dict[str, int] = {}
+    by_platform: dict[str, int] = {}
     by_refresh_token_kind: dict[str, int] = {}
     by_oauth_token_status: dict[str, int] = {}
     failed_health = {
@@ -368,6 +393,9 @@ def _stats(accounts: list[dict[str, Any]]) -> dict[str, Any]:
         "refresh_token_invalid", "refresh_token_refresh_failed",
     }
     for item in accounts:
+        platform = str(item.get("platform") or "openai").strip().lower()
+        platform = "grok" if platform == "grok" else "openai"
+        by_platform[platform] = by_platform.get(platform, 0) + 1
         status = str(item.get("status") or "active").lower()
         status_unavailable = False
         if status in {"disabled", "inactive", "blocked"}:
@@ -427,6 +455,7 @@ def _stats(accounts: list[dict[str, Any]]) -> dict[str, Any]:
     stats["by_type"] = by_type
     stats["by_plan"] = by_plan
     stats["by_health"] = by_health
+    stats["by_platform"] = by_platform
     stats["by_refresh_token_kind"] = by_refresh_token_kind
     stats["by_oauth_token_status"] = by_oauth_token_status
     stats["quota_used_total"] = round(float(stats["quota_used_total"]), 2)
@@ -435,7 +464,7 @@ def _stats(accounts: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def account_pool() -> dict[str, Any]:
-    global _pool_cache
+    global _pool_cache, _stats_cache
     signature = _source_signature()
     now = time.monotonic()
     with _pool_cache_lock:
@@ -445,20 +474,44 @@ def account_pool() -> dict[str, Any]:
     result = {"accounts": accounts, "stats": _stats(accounts)}
     with _pool_cache_lock:
         _pool_cache = (signature, now + 5.0, deepcopy(result))
+        _stats_cache = (signature, now + 5.0, deepcopy(result["stats"]))
     return result
+
+
+def account_pool_stats() -> dict[str, Any]:
+    global _stats_cache
+    signature = _source_signature()
+    now = time.monotonic()
+    with _pool_cache_lock:
+        if _pool_cache and _pool_cache[0] == signature and _pool_cache[1] > now:
+            return deepcopy(_pool_cache[2]["stats"])
+        if _stats_cache and _stats_cache[0] == signature and _stats_cache[1] > now:
+            return deepcopy(_stats_cache[2])
+    stats = _stats(list_registered_accounts(include_secret=True))
+    with _pool_cache_lock:
+        _stats_cache = (signature, now + 5.0, deepcopy(stats))
+    return stats
 
 
 def account_pool_page(limit: int = 100, offset: int = 0, *, include_secret: bool = True) -> dict[str, Any]:
     page_limit = max(1, min(500, int(limit or 100)))
     page_offset = max(0, int(offset or 0))
     with _lock:
-        raw_items = [item for item in _load() if isinstance(item, dict)]
-    selected = raw_items[page_offset:page_offset + page_limit]
+        page = collection_page(REGISTERED_ACCOUNTS_FILE, limit=page_limit, offset=page_offset)
+        if page is None:
+            raw_items = [item for item in _load() if isinstance(item, dict)]
+            migrated_page = collection_page(REGISTERED_ACCOUNTS_FILE, limit=page_limit, offset=page_offset)
+            if migrated_page is None:
+                selected = raw_items[page_offset:page_offset + page_limit]
+                total = len(raw_items)
+            else:
+                selected, total = migrated_page
+        else:
+            selected, total = page
     accounts = [_public(item, include_secret=include_secret) for item in (_normalize(raw) for raw in selected) if item]
-    total = len(raw_items)
     return {
         "accounts": accounts,
-        "stats": {"total": total},
+        "stats": account_pool_stats(),
         "page_info": {
             "offset": page_offset,
             "limit": page_limit,
@@ -576,6 +629,80 @@ def clear_registered_accounts() -> dict[str, Any]:
     result = account_pool()
     result["removed"] = count
     return result
+
+
+def registration_batches() -> list[dict[str, Any]]:
+    accounts = list_registered_accounts(include_secret=False)
+    batches: dict[str, dict[str, Any]] = {}
+    for item in accounts:
+        batch_id = _registration_batch_id(item)
+        bucket = batches.setdefault(batch_id, {
+            "id": batch_id,
+            "label": str(item.get("registration_batch_label") or batch_id),
+            "created_at": str(item.get("created_at") or ""),
+            "total": 0,
+            "available": 0,
+            "outbound": 0,
+        })
+        bucket["total"] += 1
+        created = str(item.get("created_at") or "")
+        if created and (not bucket["created_at"] or created < bucket["created_at"]):
+            bucket["created_at"] = created
+        if item.get("outbound_at"):
+            bucket["outbound"] += 1
+        else:
+            bucket["available"] += 1
+    return sorted(batches.values(), key=lambda item: str(item.get("created_at") or ""), reverse=True)
+
+
+def select_accounts_for_outbound(
+    *,
+    quantity: int = 0,
+    registration_batch_id: str = "",
+    include_outbound: bool = False,
+) -> list[dict[str, Any]]:
+    batch_id = str(registration_batch_id or "").strip()
+    accounts = list_registered_accounts(include_secret=True)
+    selected = [
+        item for item in accounts
+        if (not batch_id or _registration_batch_id(item) == batch_id)
+        and (include_outbound or not str(item.get("outbound_at") or "").strip())
+        and bool(str(item.get("access_token") or "").strip())
+    ]
+    selected.sort(key=lambda item: str(item.get("created_at") or ""))
+    limit = max(0, int(quantity or 0))
+    return selected[:limit] if limit else selected
+
+
+def mark_accounts_outbound(accounts: list[dict[str, Any]], *, export_format: str) -> dict[str, Any]:
+    selectors = [account_identity_key(item) or str(item.get("inventory_id") or "") for item in accounts]
+    selectors = [item for item in selectors if item]
+    if not selectors:
+        return {"marked": 0, "outbound_batch_id": "", "outbound_at": ""}
+    outbound_at = _now()
+    outbound_batch_id = f"out-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
+    marked = 0
+    with _lock:
+        items: list[dict[str, Any]] = []
+        for raw in _load():
+            normalized = _normalize(raw) if isinstance(raw, dict) else None
+            if not normalized:
+                continue
+            if any(account_matches_selector(normalized, selector) for selector in selectors):
+                normalized.update({
+                    "outbound_at": outbound_at,
+                    "outbound_batch_id": outbound_batch_id,
+                    "outbound_format": str(export_format or "json").strip().lower(),
+                    "updated_at": outbound_at,
+                })
+                marked += 1
+            items.append(normalized)
+        _save(items)
+    return {
+        "marked": marked,
+        "outbound_batch_id": outbound_batch_id,
+        "outbound_at": outbound_at,
+    }
 
 
 def _parse_credentials_map(value: Any) -> dict[str, Any]:

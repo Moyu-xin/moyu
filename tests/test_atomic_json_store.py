@@ -47,6 +47,42 @@ class AtomicJsonStoreTests(unittest.TestCase):
             self.assertEqual(path.read_text(encoding="utf-8"), original)
             self.assertEqual(list(Path(root).glob("*.tmp")), [])
 
+    def test_transient_permission_error_is_retried(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "state.json"
+            real_replace = os.replace
+            attempts = 0
+
+            def replace(source, destination):
+                nonlocal attempts
+                attempts += 1
+                if attempts < 3:
+                    raise PermissionError(13, "temporarily locked")
+                return real_replace(source, destination)
+
+            with (
+                patch("services.atomic_json_store.os.replace", side_effect=replace),
+                patch("services.atomic_json_store.time.sleep"),
+            ):
+                write_json(path, {"version": 2}, backup=False)
+
+            self.assertEqual(json.loads(path.read_text(encoding="utf-8")), {"version": 2})
+            self.assertEqual(attempts, 3)
+
+    def test_persistent_permission_error_falls_back_to_locked_overwrite(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "state.json"
+            path.write_text('{"version": 1}\n', encoding="utf-8")
+
+            with (
+                patch("services.atomic_json_store.os.replace", side_effect=PermissionError(13, "destination locked")),
+                patch("services.atomic_json_store.time.sleep"),
+            ):
+                write_json(path, {"version": 2}, backup=False)
+
+            self.assertEqual(json.loads(path.read_text(encoding="utf-8")), {"version": 2})
+            self.assertEqual(list(Path(root).glob("*.tmp")), [])
+
     def test_corrupt_primary_is_restored_from_backup(self) -> None:
         with tempfile.TemporaryDirectory() as root:
             path = Path(root) / "state.json"

@@ -1,16 +1,27 @@
 from __future__ import annotations
 
 import json
+import errno
 import os
 import threading
+import time
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, Callable
+
+from services.sqlite_store import (
+    has_document as sqlite_has_document,
+    preserve_json_migration_source,
+    read_document as sqlite_read_document,
+    should_use_sqlite,
+    write_document as sqlite_write_document,
+)
 
 _locks_guard = threading.Lock()
 _path_locks: dict[str, threading.RLock] = {}
 _cache_guard = threading.Lock()
 _json_cache: dict[str, tuple[tuple[int, int], Any]] = {}
+_REPLACE_RETRY_DELAYS = (0.02, 0.05, 0.1, 0.2, 0.4, 0.8)
 
 
 class JsonStoreReadError(RuntimeError):
@@ -48,6 +59,38 @@ def _write_bytes(path: Path, content: bytes) -> None:
         os.fsync(handle.fileno())
 
 
+def _is_transient_replace_error(error: OSError) -> bool:
+    return (
+        isinstance(error, PermissionError)
+        or getattr(error, "winerror", None) in {5, 32, 33}
+        or getattr(error, "errno", None) in {errno.EACCES, errno.EPERM, errno.EBUSY}
+    )
+
+
+def _replace_file(source: Path, destination: Path) -> None:
+    last_error: OSError | None = None
+    for delay in (*_REPLACE_RETRY_DELAYS, None):
+        try:
+            os.replace(source, destination)
+            return
+        except OSError as error:
+            if not _is_transient_replace_error(error):
+                raise
+            last_error = error
+            if delay is not None:
+                time.sleep(delay)
+
+    # Windows scanners can hold the destination without FILE_SHARE_DELETE.
+    # In-process readers are blocked by the path lock and the backup is already
+    # durable, so an fsynced overwrite is safer than failing every registration.
+    try:
+        _write_bytes(destination, source.read_bytes())
+        source.unlink(missing_ok=True)
+    except OSError as fallback_error:
+        assert last_error is not None
+        raise last_error from fallback_error
+
+
 def write_json(
     path: Path | str,
     data: Any,
@@ -58,6 +101,10 @@ def write_json(
     schema_version: int | None = None,
 ) -> None:
     target = Path(path)
+    if should_use_sqlite(target):
+        sqlite_write_document(target, data, schema_version=schema_version)
+        _invalidate_cache(target)
+        return
     target.parent.mkdir(parents=True, exist_ok=True)
     payload = data
     if schema_version is not None:
@@ -77,9 +124,9 @@ def write_json(
         try:
             if backup and target.exists():
                 _write_bytes(backup_temp, target.read_bytes())
-                os.replace(backup_temp, backup_path)
+                _replace_file(backup_temp, backup_path)
             _write_bytes(temp, content)
-            os.replace(temp, target)
+            _replace_file(temp, target)
             _invalidate_cache(target)
         finally:
             temp.unlink(missing_ok=True)
@@ -94,6 +141,11 @@ def read_json(
     restore_backup: bool = True,
 ) -> Any:
     target = Path(path)
+    if should_use_sqlite(target) and sqlite_has_document(target):
+        try:
+            return sqlite_read_document(target, expected_schema_version=expected_schema_version)
+        except RuntimeError as error:
+            raise JsonStoreReadError(str(error)) from error
     if not target.exists():
         return deepcopy(default)
     backup_path = target.with_suffix(target.suffix + ".bak")
@@ -126,8 +178,14 @@ def read_json(
                 return data
             data = parse(target)
             if expected_schema_version is not None and (not isinstance(data, dict) or data.get("schema_version") is None):
+                if should_use_sqlite(target):
+                    preserve_json_migration_source(target)
                 write_json(target, data, schema_version=expected_schema_version)
             else:
+                if should_use_sqlite(target):
+                    preserve_json_migration_source(target)
+                    sqlite_write_document(target, data, schema_version=None)
+                    return sqlite_read_document(target, expected_schema_version=expected_schema_version)
                 with _cache_guard:
                     _json_cache[cache_key] = (signature, deepcopy(data))
             return data
@@ -148,5 +206,10 @@ def read_json(
                     if expected_schema_version is not None and (not isinstance(recovered, dict) or recovered.get("schema_version") is None):
                         schema_version = expected_schema_version
                     write_json(target, recovered, backup=False, schema_version=schema_version)
+                elif should_use_sqlite(target):
+                    preserve_json_migration_source(target)
+                    sqlite_write_document(target, recovered, schema_version=expected_schema_version)
+                if should_use_sqlite(target):
+                    return sqlite_read_document(target, expected_schema_version=expected_schema_version)
                 return recovered
             raise JsonStoreReadError(f"JSON state is unreadable and has no valid backup: {target}; {primary_error}") from primary_error

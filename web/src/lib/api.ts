@@ -78,13 +78,14 @@ export type RegisterConfig = {
   total: number;
   threads: number;
   mode: "total" | "quota" | "available";
-  register_mode?: "free" | "k12";
+  register_mode?: "free" | "k12" | "grok";
   product_mode?: "partial" | "finished";
   mailbox_group?: string;
   target_quota: number;
   target_available: number;
   check_interval: number;
   k12_mode?: boolean;
+  grok?: GrokRegisterConfig;
   enabled: boolean;
   stats: {
     success: number;
@@ -100,6 +101,13 @@ export type RegisterConfig = {
     registered_total?: number;
     partial_total?: number;
     stored_total?: number;
+    failure_reasons?: Record<string, {
+      code: string;
+      label: string;
+      count: number;
+      last_error?: string;
+      last_at?: string;
+    }>;
   };
   logs?: Array<{ time: string; text: string; level: string }>;
   runtime_config?: {
@@ -142,10 +150,27 @@ export type MailboxItem = {
   token_refresh_error?: string;
   token_refresh_mode?: string;
   line?: string;
+  inventory_batch_id?: string;
+  outbound_at?: string;
+  outbound_batch_id?: string;
+  outbound_format?: string;
+  split_alias_generated?: number;
+  split_alias_used?: number;
+  split_alias_failed?: number;
+  split_alias_in_use?: number;
+};
+
+export type InventoryBatch = {
+  id: string;
+  label?: string;
+  created_at?: string;
+  total: number;
+  available: number;
+  outbound: number;
 };
 
 export type MailProviderConfigs = {
-  registration_source: "outlook_token" | "gmail_oauth" | "cloudflare_temp_email" | "ddg_mail" | "duckmail" | "openai_cpa";
+  registration_source: "outlook_token" | "gmail_oauth" | "cloudflare_temp_email" | "ddg_mail" | "duckmail" | "yyds_mail" | "openai_cpa";
   outlook_token: {
     mailbox_group: string;
     mode: "auto" | "graph" | "imap" | string;
@@ -190,6 +215,16 @@ export type MailProviderConfigs = {
     enable: boolean;
     api_key?: string;
     default_domain: string;
+    has_api_key?: boolean;
+    api_key_preview?: string;
+  };
+  yyds_mail: {
+    enable: boolean;
+    api_base: string;
+    api_key?: string;
+    domain: string;
+    subdomain: string;
+    wildcard: boolean;
     has_api_key?: boolean;
     api_key_preview?: string;
   };
@@ -256,8 +291,10 @@ export type MailboxCodeMessage = {
   message_id?: string;
   subject?: string;
   sender?: string;
+  recipients?: string[];
   received_at?: string;
   body_preview?: string;
+  body_text?: string;
   code?: string;
 };
 
@@ -301,6 +338,7 @@ export type OutlookTokenRefreshResult = {
 export type AccountItem = {
   inventory_id?: string;
   inventory_key?: string;
+  platform?: "openai" | "grok" | string;
   email: string;
   password?: string;
   access_token?: string;
@@ -342,6 +380,11 @@ export type AccountItem = {
   token_expires_in?: number;
   created_at?: string;
   updated_at?: string;
+  registration_batch_id?: string;
+  registration_batch_label?: string;
+  outbound_at?: string;
+  outbound_batch_id?: string;
+  outbound_format?: string;
   k12_mode?: boolean;
   k12_team_id?: string;
   workspace_id?: string;
@@ -356,6 +399,9 @@ export type AccountItem = {
   cpa_import_status?: string;
   cpa_auth_file?: string;
   cpa_last_error?: string;
+  grok2api_imported_at?: string;
+  grok2api_import_status?: string;
+  grok2api_last_error?: string;
   cpa_health_status?: string;
   cpa_health_checked_at?: string;
   cpa_health_code?: number;
@@ -404,6 +450,56 @@ export type AccountItem = {
   [key: string]: unknown;
 };
 
+export type GrokSolverStatus = {
+  running: boolean;
+  reachable: boolean;
+  pid?: number | null;
+  listener_pid?: number | null;
+  url: string;
+  managed: boolean;
+  state?: "managed" | "external" | "degraded" | "starting" | "stopped" | string;
+  browser_ready?: boolean | null;
+  health_supported?: boolean;
+  listener_verified?: boolean;
+  actual_threads?: number | null;
+  health?: {
+    ok?: boolean;
+    initialized?: boolean;
+    browser_type?: string;
+    configured_threads?: number;
+    available_browsers?: number;
+    connected_browsers?: number;
+    busy_browsers?: number;
+    inflight_tasks?: number;
+    active_tasks?: number;
+    queued_tasks?: number;
+    max_inflight_tasks?: number;
+  };
+  started_at?: number;
+  last_error?: string;
+  browser_type?: string;
+};
+
+export type GrokRegisterConfig = {
+  captcha_provider: "local" | "yescaptcha";
+  local_solver_url: string;
+  solver_auto_start: boolean;
+  solver_threads: number;
+  yescaptcha_key?: string;
+  has_yescaptcha_key?: boolean;
+  yescaptcha_endpoint?: string;
+  captcha_timeout: number;
+  email_timeout: number;
+  request_timeout: number;
+  oauth_timeout: number;
+  exchange_oauth: boolean;
+  delivery_target: "warehouses" | "shipping";
+  auto_import_sub2api: boolean;
+  auto_import_cpa: boolean;
+  auto_import_grok2api: boolean;
+  solver_status?: GrokSolverStatus;
+};
+
 export type AccountPool = {
   accounts: AccountItem[];
   stats: Record<string, unknown>;
@@ -415,6 +511,42 @@ export type AccountPool = {
   changed_emails?: string[];
   changed_account_ids?: string[];
   page_info?: InventoryPageInfo;
+};
+
+export type ShippingAccountItem = AccountItem & {
+  shipping_id: string;
+  registered_at?: string;
+  sso_token?: string;
+  sso_token_preview?: string;
+  has_sso_token?: boolean;
+  store_listing_id?: string;
+  store_card_code?: string;
+  store_synced_at?: string;
+  store_sync_batch_id?: string;
+  last_health_attempt_status?: string;
+  last_health_attempt_code?: number;
+  last_health_attempt_error?: string;
+  died_at?: string;
+};
+
+export type ShippingAccountPool = {
+  accounts: ShippingAccountItem[];
+  stats: Record<string, number>;
+  batches: Array<{ id: string; label: string; total: number; alive: number; available: number }>;
+  removed?: number;
+  page_info?: InventoryPageInfo;
+};
+
+export type ShippingStoreConfig = {
+  enabled: boolean;
+  base_url: string;
+  api_key?: string;
+  has_api_key?: boolean;
+  api_key_preview?: string;
+  card_prefix: string;
+  request_timeout: number;
+  updated_at?: string;
+  last_publish?: Record<string, unknown> | null;
 };
 
 export type PartialAccountItem = {
@@ -549,7 +681,7 @@ export type PartialAccountHealthState = {
   schedule_running: boolean;
   last_scheduled_run_at?: string;
   next_scheduled_run_at?: string;
-  last_scheduled_stats?: { total?: number; alive?: number; dead?: number; failed?: number };
+  last_scheduled_stats?: { total?: number; alive?: number; dead?: number; unverifiable?: number; failed?: number };
   last_error?: string;
   task?: {
     enabled: boolean;
@@ -557,7 +689,7 @@ export type PartialAccountHealthState = {
     stop_requested?: boolean;
     started_at?: string;
     finished_at?: string;
-    stats?: { total?: number; alive?: number; dead?: number; failed?: number };
+    stats?: { total?: number; alive?: number; dead?: number; unverifiable?: number; failed?: number };
     error?: string;
   };
   busy?: boolean;
@@ -689,21 +821,39 @@ export type PlusLinkConfig = {
   residential_promotion_proxy_count?: number;
   residential_single_proxy_mode: boolean;
   residential_session_ttl_minutes: number;
+  proxy_quality_gate_enabled?: boolean;
+  proxy_quality_candidate_limit?: number;
+  proxy_quality_probe_rounds?: number;
+  proxy_quality_max_latency_ms?: number;
+  proxy_quality_quarantine_seconds?: number;
   residential_via_project_proxy: boolean;
   residential_parent_node_filter: string;
+  residential_parent_proxy_override?: string;
   residential_via_clash: boolean;
   residential_clash_proxy: string;
   proxy: string;
   target_country: string;
   checkout_country: string;
+  provider_country: string;
+  approve_country: string;
   promotion_country: string;
   payment_method_country: string;
   payment_locale: string;
+  checkout_ui_mode?: "hosted" | "custom" | string;
+  stripe_provider_egress?: "left_residential" | "project_parent" | "us_residential" | string;
+  stripe_poll_egress?: "promotion" | "provider" | string;
+  post_approve_poll_timeout_seconds?: number;
+  enable_playwright_approve_fallback?: boolean;
+  enable_playwright_redirect_fallback?: boolean;
+  allow_intermediate_url_fallback?: boolean;
+  paypal_confirm_mode?: "direct" | "payment_method" | string;
+  paypal_confirm_protocol?: "standalone" | "enhanced" | "minimal" | "chatgpt_confirm" | string;
   concurrency: number;
   timeout_seconds: number;
   checkout_retry_limit: number;
   provider_retry_limit: number;
   matrix_combo_retry_limit: number;
+  smsbower_pm_max_price?: number;
   retry_limits_version?: number;
   extraction_mode?: "matrix" | "fixed_pair" | string;
   active_retry_limit?: number;
@@ -715,33 +865,133 @@ export type PlusLinkConfig = {
   proxy_country_rotation?: string[] | string;
   matrix_total?: number;
   require_zero_stripe_amount: boolean;
+  require_ipv6_egress: boolean;
   strict_same_proxy_ip: boolean;
   strict_approve_same_proxy_ip: boolean;
+};
+
+export type PlusLinkAttemptDiagnostic = {
+  run_number?: number;
+  matrix_index?: number;
+  matrix_total?: number;
+  attempt: number;
+  attempt_limit?: number;
+  status: "success" | "failed" | string;
+  started_at?: string;
+  finished_at?: string;
+  duration_seconds?: number;
+  failure_step?: string;
+  failure_category?: string;
+  error?: string;
+  checkout_country?: string;
+  provider_country?: string;
+  approve_country?: string;
+  promotion_country?: string;
+  payment_method_country?: string;
+  checkout_proxy_ip?: string;
+  provider_proxy_ip?: string;
+  approve_proxy_ip?: string;
+  promotion_proxy_ip?: string;
+  paypal_availability?: string;
+  stripe_amount?: string;
+  currency?: string;
+  submission_state?: string;
+  submission_reason?: string;
+  submission_code?: string;
+  promotion_error?: string;
+  provider_error?: string;
+  stripe_confirm_error?: string;
+  approve_probe_error?: string;
 };
 
 export type PlusLinkResult = {
   task_id: string;
   email: string;
+  account_email?: string;
+  account_type?: string;
+  token_expires_at?: number | string | null;
+  cleanup_pending?: boolean;
   status: "queued" | "running" | "success" | "failed" | string;
   stage?: string;
   engine_step?: string;
   progress_percent?: number;
   progress_label?: string;
+  retryable?: boolean;
   error?: string;
   long_url?: string;
   long_url_present?: boolean;
   long_url_hash?: string;
+  intermediate_url?: string;
+  intermediate_url_present?: boolean;
+  intermediate_url_hash?: string;
+  intermediate_fallback_used?: boolean;
+  playwright_approve_fallback_started?: boolean;
+  playwright_approve_fallback_used?: boolean;
+  playwright_approve_fallback_error?: string;
+  playwright_fallback_started?: boolean;
+  playwright_fallback_used?: boolean;
+  playwright_redirect_host?: string;
+  playwright_redirect_error?: string;
+  right_session_expected_ip?: string;
+  right_session_pre_ip?: string;
+  right_session_pre_country?: string;
+  right_session_pre_consistent?: boolean;
+  right_session_post_ip?: string;
+  right_session_post_country?: string;
+  right_session_post_consistent?: boolean;
+  promotion_error?: string;
+  provider_error?: string;
+  stripe_confirm_error?: string;
+  approve_probe_error?: string;
+  approve_response?: string;
+  combo_diagnostics_history?: Array<Record<string, unknown>>;
+  attempt_diagnostics_history?: PlusLinkAttemptDiagnostic[];
   stripe_hosted_url?: string;
   cs_id?: string;
   billing_country?: string;
   payment_method_country?: string;
   promotion_country?: string;
   provider_country?: string;
+  approve_country?: string;
+  checkout_proxy_country?: string;
+  checkout_proxy_ip?: string;
+  provider_proxy_country?: string;
+  provider_proxy_ip?: string;
+  approve_proxy_country?: string;
+  approve_proxy_ip?: string;
+  promotion_proxy_country?: string;
+  promotion_proxy_ip?: string;
   matrix_index?: number;
   matrix_total?: number;
+  matrix_checkout_country?: string;
+  matrix_provider_country?: string;
+  matrix_promotion_country?: string;
+  matrix_failures?: number;
+  matrix_skipped?: number;
+  task_left_countries?: string[];
+  task_right_countries?: string[];
+  task_checkout_country?: string;
   processor_entity?: string;
   currency?: string;
   stripe_amount?: string;
+  paypal_availability?: "supported" | "unsupported" | "unknown" | string;
+  paypal_methods?: string[];
+  paypal_evidence_paths?: string[];
+  paypal_availability_by_country?: Record<string, string>;
+  last_combo_failure_category?: string;
+  failure_category?: string;
+  stripe_session_reused?: boolean;
+  redirect_session_state_copied?: boolean;
+  left_sticky_rotated?: boolean;
+  right_sticky_rotated?: boolean;
+  paypal_confirm_mode?: "direct" | "payment_method" | string;
+  chatgpt_approval_endpoint?: "checkout_scoped" | "payments_checkout" | string;
+  approval_session_state_copied?: boolean;
+  stripe_confirm_prep_profile?: Record<string, unknown>;
+  stripe_confirm_request_profile?: Record<string, unknown>;
+  stripe_confirm_response_profile?: Record<string, unknown>;
+  stripe_confirm_error_profile?: Record<string, string>;
+  stripe_submission_profile?: Record<string, unknown>;
   link_attempt_count?: number;
   link_attempt_limit?: number;
   extraction_mode?: "matrix" | "fixed_pair" | string;
@@ -749,9 +999,39 @@ export type PlusLinkResult = {
   eligibility_status?: string;
   eligibility_plan?: string;
   eligibility_has_email?: boolean;
+  quality_gate_status?: "pending" | "checking" | "retrying" | "passed" | "failed" | "disabled" | string;
+  quality_gate_attempt?: number;
+  quality_gate_attempt_limit?: number;
+  quality_gate_candidate_id?: string;
+  quality_gate_failure_stage?: string;
+  quality_gate_error?: string;
+  quality_gate_checked_at?: string;
+  quality_gate_results?: Array<{
+    stage?: string;
+    label?: string;
+    ok?: boolean;
+    country?: string;
+    expected_country?: string;
+    ip?: string;
+    sticky?: boolean;
+    rounds?: number;
+    geo_latency_ms?: number;
+    target_status?: number;
+    target_latency_ms?: number;
+    error?: string;
+  }>;
+  quality_gate_history?: Array<Record<string, unknown>>;
   eligibility_checked_at?: string;
   eligibility_attempt?: number;
   eligibility_attempt_limit?: number;
+  eligibility_proxy_label?: string;
+  eligibility_parent_source?: string;
+  eligibility_proxy_slot?: number;
+  eligibility_last_error?: string;
+  eligibility_failure_category?: string;
+  auto_retry_count?: number;
+  auto_retry_category?: string;
+  auto_retry_last_error?: string;
   proxy_label?: string;
   proxy_source?: string;
   current_proxy_ip?: string;
@@ -772,6 +1052,8 @@ export type PlusLinkResult = {
 
 export type PlusLinkState = {
   enabled: boolean;
+  runner_alive?: boolean;
+  stopping?: boolean;
   config: PlusLinkConfig;
   stats: {
     success: number;
@@ -789,6 +1071,101 @@ export type PlusLinkState = {
   account_pool?: AccountPool;
   partial_account_pool?: PartialAccountPool;
   proxy_pool?: ProxyPool;
+  bulk_retry?: {
+    requested: number;
+    restarted: number;
+    skipped: number;
+  };
+};
+
+export type PaypalPaymentConfig = {
+  auto_pay_new_links: boolean;
+  protocol_country: "AUTO" | "BR" | "GB" | "US" | "TH" | "ID" | string;
+  sms_provider: "smsbower" | "phone_pool" | string;
+  proxy_override: string;
+  smsbower_api_key: string;
+  smsbower_api_key_configured?: boolean;
+  smsbower_max_price: number;
+  max_card_attempts: number;
+  sms_max_attempts: number;
+  flow_attempts: number;
+  concurrency: number;
+};
+
+export type PaypalPaymentCandidate = {
+  source_task_id: string;
+  email: string;
+  ba_url: string;
+  ba_url_hash: string;
+  country: string;
+  protocol_mode: string;
+  supported: boolean;
+  paid: boolean;
+  created_at?: string;
+  plus_status?: string;
+};
+
+export type PaypalPaymentResult = {
+  task_id: string;
+  source_task_id: string;
+  source_kind?: "plus" | "manual" | string;
+  email: string;
+  ba_url: string;
+  ba_url_hash: string;
+  country: string;
+  protocol_mode: string;
+  sms_provider?: "smsbower" | "phone_pool" | string;
+  status: "queued" | "running" | "cancelling" | "success" | "failed" | "cancelled" | string;
+  stage?: string;
+  engine_step?: string;
+  progress_percent?: number;
+  proxy_label?: string;
+  proxy_hash?: string;
+  last_message?: string;
+  last_log?: string;
+  payment_result?: Record<string, unknown>;
+  error?: string;
+  duration_seconds?: number;
+  created_at?: string;
+  started_at?: string;
+  finished_at?: string;
+  updated_at?: string;
+};
+
+export type PaypalPaymentState = {
+  enabled: boolean;
+  runner_alive?: boolean;
+  config: PaypalPaymentConfig;
+  stats: {
+    success: number;
+    fail: number;
+    cancelled: number;
+    done: number;
+    running: number;
+    total: number;
+    updated_at?: string;
+  };
+  logs: Array<{ time: string; text: string; level: string }>;
+  candidates: PaypalPaymentCandidate[];
+  results: PaypalPaymentResult[];
+  phone_pool: {
+    numbers: Array<{
+      id: string;
+      country: string;
+      phone: string;
+      status: string;
+      status_message: string;
+      available: boolean;
+      in_use: boolean;
+      fail_count: number;
+      url_host?: string;
+      url_hint?: string;
+      updated_at?: number;
+    }>;
+    summary: Record<string, number>;
+    total: number;
+    load_error?: string;
+  };
 };
 
 export type GarbageHealthConfig = {
@@ -938,6 +1315,31 @@ export type CpaConfig = {
   updated_at?: string;
 };
 
+export type Grok2ApiConfig = {
+  enabled: boolean;
+  base_url: string;
+  username: string;
+  skip_ssl_verify: boolean;
+  notes: string;
+  has_password?: boolean;
+  has_admin_token?: boolean;
+  admin_token_preview?: string;
+  last_import?: Record<string, unknown> | null;
+  updated_at?: string;
+};
+
+export type Grok2ApiImportResult = {
+  ok: boolean;
+  total: number;
+  created: number;
+  updated: number;
+  synced: number;
+  sync_failed: number;
+  status_code?: number;
+  error?: string;
+  imported_at?: string;
+};
+
 export type WarehouseImportItemResult = {
   email?: string;
   name?: string;
@@ -988,6 +1390,21 @@ export async function stopRegister() {
 
 export async function resetRegister() {
   return httpRequest<{ register: RegisterConfig }>("/api/register/reset", { method: "POST" });
+}
+
+export async function clearRegisterLogs() {
+  return httpRequest<{ register: RegisterConfig }>("/api/register/logs/clear", { method: "POST" });
+}
+
+export async function fetchGrokSolver() {
+  return httpRequest<{ grok_solver: GrokSolverStatus }>("/api/grok/solver");
+}
+
+export async function controlGrokSolver(action: "start" | "stop" | "restart", options: { url?: string; threads?: number } = {}) {
+  return httpRequest<{ grok_solver: GrokSolverStatus }>("/api/grok/solver", {
+    method: "POST",
+    body: { action, ...options },
+  });
 }
 
 export async function resetOutlookTokenPool(scope: "all" | "failed" | "unused" = "all") {
@@ -1064,6 +1481,14 @@ export async function restartSystem() {
 export async function fetchOutlookMailboxPool(options: { force?: boolean; preview?: boolean } = {}) {
   const path = options.preview ? "/api/outlook-mailboxes?limit=100" : "/api/outlook-mailboxes";
   return cachedHttpRequest<{ mailboxes: MailboxPool }>(path, { maxAgeMs: 10_000, force: options.force });
+}
+
+export async function fetchMailboxBatches(providerType = "outlook_token") {
+  return httpRequest<{ batches: InventoryBatch[] }>(`/api/mailboxes/batches?provider_type=${encodeURIComponent(providerType)}`);
+}
+
+export async function outboundMailboxes(payload: { quantity?: number; inventory_batch_id?: string; provider_type?: string; format?: "credentials" | "json"; include_outbound?: boolean }) {
+  return httpRequest<{ mailbox_outbound: { count: number; skipped?: number; filename: string; format: string; data: unknown; outbound_batch_id: string }; batches: InventoryBatch[] }>("/api/mailboxes/outbound", { method: "POST", body: payload });
 }
 
 export async function fetchOutlookMailboxMessages(email: string, options: { limit?: number; mode?: "auto" | "graph" | "imap"; request_timeout?: number } = {}) {
@@ -1158,6 +1583,56 @@ export async function fetchPartialAccountPool(options: { force?: boolean; previe
   return cachedHttpRequest<{ partial_account_pool: PartialAccountPool }>(path, { maxAgeMs: 10_000, force: options.force });
 }
 
+export async function fetchShippingAccountPool(options: { force?: boolean; preview?: boolean } = {}) {
+  const path = options.preview ? "/api/shipping-accounts?limit=100" : "/api/shipping-accounts?limit=500";
+  return cachedHttpRequest<{ shipping_pool: ShippingAccountPool }>(path, { maxAgeMs: 10_000, force: options.force });
+}
+
+export async function fetchShippingStoreConfig(options: { force?: boolean } = {}) {
+  return cachedHttpRequest<{ shipping_config: ShippingStoreConfig }>("/api/shipping-accounts/config", { maxAgeMs: 30_000, force: options.force });
+}
+
+export async function updateShippingStoreConfig(updates: Partial<ShippingStoreConfig>) {
+  return httpRequest<{ shipping_config: ShippingStoreConfig }>("/api/shipping-accounts/config", { method: "POST", body: updates });
+}
+
+export async function testShippingStoreConnection() {
+  return httpRequest<{ store_test: { ok: boolean; tested_at: string; store?: Record<string, unknown> } }>("/api/shipping-accounts/store/test", { method: "POST" });
+}
+
+export async function checkShippingAccountHealth(selectors: string[] = [], concurrency = 8) {
+  return httpRequest<{
+    shipping_health: {
+      ok: boolean;
+      stats: { total: number; alive: number; failed: number };
+      results: Array<Record<string, unknown>>;
+      shipping_pool: ShippingAccountPool;
+    };
+  }>("/api/shipping-accounts/health/check", { method: "POST", body: { selectors, concurrency } });
+}
+
+export async function importShippingAccounts(target: "sub2api" | "grok2api", selectors: string[] = []) {
+  return httpRequest<{
+    shipping_import: { ok: boolean; target: string; count: number; result: Record<string, unknown>; shipping_pool: ShippingAccountPool };
+  }>("/api/shipping-accounts/import", { method: "POST", body: { target, selectors } });
+}
+
+export async function outboundShippingAccounts(payload: { selectors?: string[]; quantity?: number; registration_batch_id?: string; format?: "sub2api" | "grok2api"; include_outbound?: boolean }) {
+  return httpRequest<{
+    shipping_outbound: { ok: boolean; count: number; filename: string; format: string; content: Record<string, unknown>; outbound_batch_id: string; shipping_pool: ShippingAccountPool };
+  }>("/api/shipping-accounts/outbound", { method: "POST", body: payload });
+}
+
+export async function publishShippingAccounts(payload: { selectors?: string[]; quantity?: number; registration_batch_id?: string; include_outbound?: boolean }) {
+  return httpRequest<{
+    store_publish: { ok: boolean; requested: number; published: number; publish_batch_id: string; stock_items: Array<Record<string, unknown>>; stock_stats: Record<string, number>; shipping_pool: ShippingAccountPool };
+  }>("/api/shipping-accounts/store/publish", { method: "POST", body: payload });
+}
+
+export async function deleteShippingAccounts(selectors: string[]) {
+  return httpRequest<{ shipping_pool: ShippingAccountPool }>("/api/shipping-accounts/delete", { method: "POST", body: { selectors } });
+}
+
 export async function importPartialAccounts(text: string, options: { auto_health_check?: boolean; drop_banned?: boolean } = {}) {
   return httpRequest<{
     partial_account_pool: PartialAccountPool;
@@ -1202,7 +1677,7 @@ export async function checkPartialAccountHealth(selectors: string[] = [], refres
   return httpRequest<{
     partial_health: {
       ok: boolean;
-      stats: { total: number; alive: number; dead: number; failed: number; quota_ok?: number; quota_failed?: number };
+      stats: { total: number; alive: number; dead: number; unverifiable: number; failed: number; quota_ok?: number; quota_failed?: number };
       results: Array<Record<string, unknown>>;
       partial_account_pool: PartialAccountPool;
     };
@@ -1216,7 +1691,7 @@ export async function checkPartialAccountQuota(selectors: string[] = [], concurr
   return httpRequest<{
     partial_health: {
       ok: boolean;
-      stats: { total: number; alive: number; dead: number; failed: number; quota_ok?: number; quota_failed?: number };
+      stats: { total: number; alive: number; dead: number; unverifiable: number; failed: number; quota_ok?: number; quota_failed?: number };
       results: Array<Record<string, unknown>>;
       partial_account_pool: PartialAccountPool;
     };
@@ -1415,8 +1890,8 @@ export async function refreshAccountToken(email: string) {
   return httpRequest<{ account: AccountItem; account_pool: AccountPool }>(`/api/accounts/${encodeURIComponent(email)}/refresh-token`, { method: "POST" });
 }
 
-export async function fetchSub2ApiConfig() {
-  return httpRequest<{ sub2api_config: Sub2ApiConfig }>("/api/sub2api-config");
+export async function fetchSub2ApiConfig(options: { force?: boolean } = {}) {
+  return cachedHttpRequest<{ sub2api_config: Sub2ApiConfig }>("/api/sub2api-config", { maxAgeMs: 30_000, force: options.force });
 }
 
 export async function updateSub2ApiConfig(updates: Partial<Omit<Sub2ApiConfig, "group_ids">> & { group_ids?: number[] | string; admin_token?: string; password?: string }) {
@@ -1433,11 +1908,19 @@ export async function exportAccountsToSub2ApiData(emails: string[] = []) {
   });
 }
 
-export async function importAccountsToSub2Api(emails: string[] = []) {
+export async function importAccountsToSub2Api(emails: string[] = [], options: { reauthorize_grok?: boolean } = {}) {
   return httpRequest<{ sub2api: WarehouseImportResult; account_pool: AccountPool }>("/api/accounts/import-sub2api", {
     method: "POST",
-    body: { emails },
+    body: { emails, reauthorize_grok: Boolean(options.reauthorize_grok) },
   });
+}
+
+export async function fetchAccountBatches() {
+  return httpRequest<{ batches: InventoryBatch[] }>("/api/accounts/batches");
+}
+
+export async function outboundAccounts(payload: { quantity?: number; registration_batch_id?: string; format?: "sub2api" | "cpa" | "json"; include_outbound?: boolean }) {
+  return httpRequest<{ account_outbound: { count: number; skipped: number; filename: string; format: string; data: unknown; outbound_batch_id: string }; batches: InventoryBatch[] }>("/api/accounts/outbound", { method: "POST", body: payload });
 }
 
 export async function fetchK12State() {
@@ -1467,12 +1950,27 @@ export async function importAccountsToCpa(emails: string[] = []) {
   });
 }
 
-export async function fetchCpaConfig() {
-  return httpRequest<{ cpa_config: CpaConfig }>("/api/cpa-config");
+export async function importAccountsToGrok2Api(emails: string[] = []) {
+  return httpRequest<{ grok2api: Grok2ApiImportResult; account_pool: AccountPool }>("/api/accounts/import-grok2api", {
+    method: "POST",
+    body: { emails },
+  });
+}
+
+export async function fetchCpaConfig(options: { force?: boolean } = {}) {
+  return cachedHttpRequest<{ cpa_config: CpaConfig }>("/api/cpa-config", { maxAgeMs: 30_000, force: options.force });
 }
 
 export async function updateCpaConfig(updates: Partial<CpaConfig> & { management_key?: string }) {
   return httpRequest<{ cpa_config: CpaConfig; register: RegisterConfig }>("/api/cpa-config", { method: "POST", body: updates });
+}
+
+export async function fetchGrok2ApiConfig(options: { force?: boolean } = {}) {
+  return cachedHttpRequest<{ grok2api_config: Grok2ApiConfig }>("/api/grok2api-config", { maxAgeMs: 30_000, force: options.force });
+}
+
+export async function updateGrok2ApiConfig(updates: Partial<Grok2ApiConfig> & { password?: string; admin_token?: string }) {
+  return httpRequest<{ grok2api_config: Grok2ApiConfig; register: RegisterConfig }>("/api/grok2api-config", { method: "POST", body: updates });
 }
 
 export async function testSub2ApiConnection() {
@@ -1483,8 +1981,17 @@ export async function testCpaConnection() {
   return httpRequest<{ cpa_connection: Record<string, unknown> }>("/api/cpa/connection/test", { method: "POST" });
 }
 
-export async function fetchPlusLinkState() {
-  return httpRequest<{ plus_link: PlusLinkState }>("/api/plus-link");
+export async function testGrok2ApiConnection() {
+  return httpRequest<{ grok2api_connection: Record<string, unknown> }>("/api/grok2api/connection/test", { method: "POST" });
+}
+
+export async function fetchPlusLinkState(options: { includeInventory?: boolean; inventoryLimit?: number; compact?: boolean } = {}) {
+  const query = new URLSearchParams();
+  if (options.includeInventory === false) query.set("include_inventory", "false");
+  if (Number(options.inventoryLimit || 0) > 0) query.set("inventory_limit", String(Math.max(1, Math.min(500, Number(options.inventoryLimit)))))
+  if (options.compact) query.set("compact", "true");
+  const suffix = query.size ? `?${query.toString()}` : "";
+  return httpRequest<{ plus_link: PlusLinkState }>(`/api/plus-link${suffix}`);
 }
 
 export async function updatePlusLinkConfig(updates: Partial<PlusLinkConfig>) {
@@ -1497,6 +2004,7 @@ export async function startPlusLinkTask(payload: {
   manual_accounts?: Array<Record<string, unknown> | string>;
   manual_tokens?: string[];
   clear_results?: boolean;
+  persist_config?: boolean;
   config?: Partial<PlusLinkConfig>;
 } = {}) {
   return httpRequest<{ plus_link: PlusLinkState }>("/api/plus-link/start", { method: "POST", body: payload });
@@ -1522,6 +2030,14 @@ export async function retryPlusLinkTask(taskId: string) {
   return httpRequest<{ plus_link: PlusLinkState }>(`/api/plus-link/tasks/${encodeURIComponent(taskId)}/retry`, { method: "POST" });
 }
 
+export async function retryFailedPlusLinkTasks() {
+  return httpRequest<{ plus_link: PlusLinkState }>("/api/plus-link/retry-failed", { method: "POST" });
+}
+
+export async function deletePlusLinkTask(taskId: string) {
+  return httpRequest<{ plus_link: PlusLinkState }>(`/api/plus-link/tasks/${encodeURIComponent(taskId)}/delete`, { method: "POST" });
+}
+
 export async function clearPlusLinkTask() {
   return httpRequest<{ plus_link: PlusLinkState }>("/api/plus-link/clear", { method: "POST" });
 }
@@ -1532,6 +2048,50 @@ export async function clearFailedPlusLinkTasks() {
 
 export async function clearFinishedPlusLinkTasks() {
   return httpRequest<{ plus_link: PlusLinkState }>("/api/plus-link/clear-finished", { method: "POST" });
+}
+
+export async function fetchPaypalPaymentState(options: { force?: boolean } = {}) {
+  return cachedHttpRequest<{ paypal_payments: PaypalPaymentState }>("/api/paypal-payments", { maxAgeMs: 2_000, force: options.force });
+}
+
+export async function updatePaypalPaymentConfig(updates: Partial<PaypalPaymentConfig>) {
+  return httpRequest<{ paypal_payments: PaypalPaymentState }>("/api/paypal-payments/config", { method: "POST", body: updates });
+}
+
+export async function startPaypalPayments(payload: { source_task_ids?: string[]; manual_items?: Array<{ ba_url: string; country: string } | string>; persist_config?: boolean; config?: Partial<PaypalPaymentConfig> }) {
+  return httpRequest<{ paypal_payments: PaypalPaymentState }>("/api/paypal-payments/start", { method: "POST", body: payload });
+}
+
+export async function stopPaypalPayments() {
+  return httpRequest<{ paypal_payments: PaypalPaymentState }>("/api/paypal-payments/stop", { method: "POST" });
+}
+
+export async function cancelPaypalPayment(taskId: string) {
+  return httpRequest<{ paypal_payments: PaypalPaymentState }>(`/api/paypal-payments/tasks/${encodeURIComponent(taskId)}/cancel`, { method: "POST" });
+}
+
+export async function retryPaypalPayment(taskId: string) {
+  return httpRequest<{ paypal_payments: PaypalPaymentState }>(`/api/paypal-payments/tasks/${encodeURIComponent(taskId)}/retry`, { method: "POST" });
+}
+
+export async function deletePaypalPayment(taskId: string) {
+  return httpRequest<{ paypal_payments: PaypalPaymentState }>(`/api/paypal-payments/tasks/${encodeURIComponent(taskId)}/delete`, { method: "POST" });
+}
+
+export async function clearFinishedPaypalPayments() {
+  return httpRequest<{ paypal_payments: PaypalPaymentState }>("/api/paypal-payments/clear-finished", { method: "POST" });
+}
+
+export async function importPaypalPhonePool(text: string) {
+  return httpRequest<{ import_result: { imported: number; updated: number; invalid: Array<{ line: number; error: string }>; total: number }; paypal_payments: PaypalPaymentState }>("/api/paypal-payments/phone-pool/import", { method: "POST", body: { text } });
+}
+
+export async function resetPaypalPhonePool(entryId: string) {
+  return httpRequest<{ paypal_payments: PaypalPaymentState }>(`/api/paypal-payments/phone-pool/${encodeURIComponent(entryId)}/reset`, { method: "POST" });
+}
+
+export async function deletePaypalPhonePool(entryId: string) {
+  return httpRequest<{ paypal_payments: PaypalPaymentState }>(`/api/paypal-payments/phone-pool/${encodeURIComponent(entryId)}`, { method: "DELETE" });
 }
 
 export async function fetchGarbageHealthState() {
@@ -1611,6 +2171,11 @@ export type ProxyPool = {
   strategy: string;
   node_mode: string;
   fallback_proxy: string;
+  residential_provider?: string;
+  residential_proxy_count?: number;
+  residential_proxy_previews?: string[];
+  has_residential_proxies?: boolean;
+  plus_subscription_id: string;
   node_blacklist: string[];
   fastest_mode: boolean;
   max_retry_count: number;
@@ -1651,6 +2216,7 @@ export type ManagedMihomoStatus = {
   running: number;
   instances: Array<{
     slot: number;
+    purpose?: string;
     running: boolean;
     pid?: number;
     proxy_url: string;
@@ -1664,6 +2230,7 @@ export type ManagedMihomoStatus = {
   last_started_at?: string;
   quarantined?: Array<{
     name: string;
+    purpose?: string;
     until: number;
     remaining_seconds: number;
     reason: string;
@@ -1674,7 +2241,7 @@ export async function fetchProxyPool(options: { force?: boolean } = {}) {
   return cachedHttpRequest<{ proxy_pool: ProxyPool }>("/api/proxy-pool", { maxAgeMs: 10_000, force: options.force });
 }
 
-export async function updateProxyPool(updates: Partial<ProxyPool>) {
+export async function updateProxyPool(updates: Partial<ProxyPool> & { residential_proxy_text?: string; clear_residential_proxies?: boolean }) {
   return httpRequest<{ proxy_pool: ProxyPool; hot_reload: HotReloadStatus }>("/api/proxy-pool", { method: "POST", body: updates });
 }
 
@@ -1736,8 +2303,14 @@ export async function prefetchManagementData(section: string, view = "") {
     requests.push(view === "config" ? fetchMailProviderConfigs() : fetchOutlookMailboxPool({ preview: true }));
   } else if (section === "accounts") {
     requests.push(view === "partials" ? fetchPartialAccountPool({ preview: true }) : fetchAccountPool({ preview: true }));
+  } else if (section === "shipping") {
+    requests.push(fetchShippingAccountPool({ preview: true }), fetchShippingStoreConfig());
   } else if (section === "proxy") {
     requests.push(fetchProxyPool());
+  } else if (section === "warehouse") {
+    requests.push(fetchSub2ApiConfig(), fetchCpaConfig(), fetchGrok2ApiConfig());
+  } else if (section === "paypal") {
+    requests.push(fetchPaypalPaymentState());
   }
   await Promise.allSettled(requests);
 }
@@ -1807,4 +2380,29 @@ export async function testCpaAccounts(names: string[] = [], applyPolicy = false)
 
 export async function actOnCpaAccounts(names: string[], action: "enable" | "disable" | "delete") {
   return httpRequest<{ cpa_action: Record<string, unknown> }>("/api/cpa/accounts/action", { method: "POST", body: { names, action } });
+}
+
+export type Grok2ApiAccountList = {
+  ok: boolean;
+  page: number;
+  page_size: number;
+  total: number;
+  items: Array<Record<string, unknown>>;
+};
+
+export async function fetchGrok2ApiAccounts(params: { page?: number; pageSize?: number; search?: string; status?: string } = {}) {
+  const query = new URLSearchParams();
+  query.set("page", String(params.page || 1));
+  query.set("page_size", String(params.pageSize || 20));
+  if (params.search) query.set("search", params.search);
+  if (params.status && params.status !== "all") query.set("status", params.status);
+  return httpRequest<{ grok2api_accounts: Grok2ApiAccountList }>(`/api/grok2api/accounts?${query.toString()}`);
+}
+
+export async function refreshGrok2ApiAccounts(accountIds: Array<number | string>) {
+  return httpRequest<{ grok2api_refresh: Record<string, unknown> }>("/api/grok2api/accounts/refresh-quotas", { method: "POST", body: { account_ids: accountIds } });
+}
+
+export async function actOnGrok2ApiAccounts(accountIds: Array<number | string>, action: "enable" | "disable" | "delete") {
+  return httpRequest<{ grok2api_action: Record<string, unknown> }>("/api/grok2api/accounts/action", { method: "POST", body: { account_ids: accountIds, action } });
 }

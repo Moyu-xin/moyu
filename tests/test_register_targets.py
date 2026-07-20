@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from services.register_service import RegisterService, _normalize
+from services.register_service import RegisterService, _classify_failure_reason, _is_xai_risk_error, _normalize
 
 
 class RegisterTargetTests(unittest.TestCase):
@@ -69,6 +69,19 @@ class RegisterTargetTests(unittest.TestCase):
         self.assertEqual(config["register_mode"], "free")
         self.assertEqual(config["product_mode"], "partial")
 
+    def test_register_state_reuses_solver_status_for_polling(self) -> None:
+        solver_status = {"running": False, "reachable": False, "state": "stopped"}
+        with (
+            patch.object(self.service, "_pool_metrics", return_value={}),
+            patch("services.register_service.grok_solver_manager.status", return_value=solver_status) as status,
+        ):
+            first = self.service.get()
+            second = self.service.get()
+
+        self.assertEqual(first["grok"]["solver_status"], solver_status)
+        self.assertEqual(second["grok"]["solver_status"], solver_status)
+        status.assert_called_once()
+
     def test_normalize_migrates_free_wu_and_validates_product_mode(self) -> None:
         migrated = _normalize({"register_mode": "free_wu", "product_mode": "finished"})
         self.assertEqual(migrated["register_mode"], "free")
@@ -81,6 +94,101 @@ class RegisterTargetTests(unittest.TestCase):
         migrated = _normalize({"register_mode": "free_crash", "product_mode": "partial"})
         self.assertEqual(migrated["register_mode"], "free")
         self.assertEqual(migrated["product_mode"], "finished")
+
+    def test_failure_reason_classifier_covers_runtime_failures(self) -> None:
+        cases = {
+            "YesCaptcha task did not complete within 120.0s": "turnstile_timeout",
+            "ERROR_CAPTCHA_UNSOLVABLE: Workers could not solve the Captcha": "turnstile_unsolvable",
+            "ERROR_TASK_NOT_SUPPORTED: Unsupported task type": "solver_error",
+            "Failed to extract next-action from the live sign-up page; max_workers must be greater than 0": "signup_page_error",
+            "timeout waiting for xAI email verification code": "email_timeout",
+            "Failed to connect to console.x.ai port 443": "proxy_network_error",
+            "xAI create_account rejected: account_signup_error": "account_creation_rejected",
+            "[WinError 5] 拒绝访问: data/.outlook_token_used.json": "local_storage_error",
+        }
+        for error, expected in cases.items():
+            with self.subTest(error=error):
+                self.assertEqual(_classify_failure_reason(error)[0], expected)
+
+    def test_xai_http_risk_errors_are_detected_for_proxy_quarantine(self) -> None:
+        self.assertTrue(_is_xai_risk_error("xAI signup page HTTP 403"))
+        self.assertTrue(_is_xai_risk_error("xAI create_account failed: HTTP 429"))
+        self.assertFalse(_is_xai_risk_error("OpenAI OAuth HTTP 403"))
+
+    def test_xai_http_403_quarantines_managed_proxy(self) -> None:
+        assignment = {
+            "proxy": "http://127.0.0.1:42000",
+            "source": "managed_mihomo",
+            "node_id": "node-xai-403",
+            "label": "xAI blocked node",
+        }
+
+        def failed_worker(index: int, _proxy: str, worker_assignment: dict, **_kwargs) -> dict:
+            return {
+                "ok": False,
+                "index": index,
+                "error": "xAI signup page HTTP 403",
+                "proxy_assignment": worker_assignment,
+            }
+
+        self.service._config.update({"enabled": True, "threads": 1, "total": 1, "mode": "total"})
+        with (
+            patch("services.register_service.proxy_pool_store.assign_proxy", return_value=assignment),
+            patch("services.register_service.openai_register.worker", side_effect=failed_worker),
+            patch("services.register_service.managed_mihomo_manager.report_failure", return_value={"ok": True, "remaining_seconds": 900, "name": "xAI blocked node"}) as report_failure,
+            patch("services.register_service.list_registered_accounts", return_value=[]),
+            patch("services.register_service.partial_account_store.list_partial_accounts", return_value=[]),
+        ):
+            self.service._run()
+
+        report_failure.assert_called_once()
+        self.assertEqual(self.service._config["stats"]["fail"], 1)
+
+    def test_record_failure_counts_each_terminal_result_once(self) -> None:
+        first = {"ok": False, "error": "YesCaptcha task did not complete within 120.0s"}
+        second = {"ok": False, "error": "ERROR_TASK_NOT_SUPPORTED: Unsupported task type"}
+
+        self.service._record_failure(first)
+        self.service._record_failure(first)
+        self.service._record_failure(second)
+
+        reasons = self.service._config["stats"]["failure_reasons"]
+        self.assertEqual(reasons["turnstile_timeout"]["count"], 2)
+        self.assertEqual(reasons["solver_error"]["count"], 1)
+        self.assertEqual(first["failure_reason"], "turnstile_timeout")
+
+    def test_run_aggregates_terminal_failure_reasons(self) -> None:
+        failures = [
+            {"ok": False, "index": 1, "error": "YesCaptcha task did not complete within 120.0s"},
+            {"ok": False, "index": 2, "error": "ERROR_TASK_NOT_SUPPORTED: Unsupported task type"},
+        ]
+        self.service._config.update({"enabled": True, "threads": 1, "total": 2, "mode": "total"})
+        with (
+            patch("services.register_service.proxy_pool_store.assign_proxy", return_value={"proxy": "", "source": "fallback"}),
+            patch("services.register_service.openai_register.worker", side_effect=failures),
+            patch("services.register_service.list_registered_accounts", return_value=[]),
+            patch("services.register_service.partial_account_store.list_partial_accounts", return_value=[]),
+        ):
+            self.service._run()
+
+        stats = self.service._config["stats"]
+        self.assertEqual(stats["fail"], 2)
+        self.assertEqual(stats["failure_reasons"]["turnstile_timeout"]["count"], 1)
+        self.assertEqual(stats["failure_reasons"]["solver_error"]["count"], 1)
+
+    def test_clear_logs_preserves_running_state_and_statistics(self) -> None:
+        self.service._config["enabled"] = True
+        self.service._config["stats"].update({"success": 8, "fail": 3, "done": 11, "running": 1})
+        self.service._logs = [{"time": "2026-07-17T00:00:00+00:00", "text": "old log", "level": "info"}]
+
+        snapshot = self.service.clear_logs()
+
+        self.assertEqual(snapshot["logs"], [])
+        self.assertTrue(snapshot["enabled"])
+        self.assertEqual(snapshot["stats"]["success"], 8)
+        self.assertEqual(snapshot["stats"]["fail"], 3)
+        self.assertEqual(snapshot["stats"]["done"], 11)
+        self.assertEqual(snapshot["stats"]["running"], 1)
 
     def test_get_refreshes_registered_partial_and_stored_totals(self) -> None:
         with (

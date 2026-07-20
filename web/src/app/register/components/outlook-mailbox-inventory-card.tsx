@@ -3,6 +3,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowDownAZ,
+  Check,
+  ChevronDown,
+  ChevronUp,
   Clock3,
   Copy,
   Download,
@@ -38,9 +41,11 @@ import {
   createMailboxGroup,
   deleteMailbox,
   deleteMailboxGroup,
+  fetchMailboxBatches,
   fetchOutlookMailboxMessages,
   fetchOutlookMailboxPool,
   importMailboxes,
+  outboundMailboxes,
   refreshOutlookMailboxTokens,
   renameMailboxGroup,
   resetMailboxStates,
@@ -48,6 +53,7 @@ import {
   type MailboxCodeMessage,
   type MailboxItem,
   type MailboxPool,
+  type InventoryBatch,
   type OutlookTokenRefreshResult,
 } from "@/lib/api";
 
@@ -105,6 +111,11 @@ function messageKey(message: MailboxCodeMessage, index: number) {
   return String(message.message_id || `${message.received_at || "message"}-${index}`);
 }
 
+function messageRecipients(message: MailboxCodeMessage | null, fallback = "") {
+  const recipients = (message?.recipients || []).map((value) => String(value || "").trim()).filter(Boolean);
+  return recipients.length ? recipients.join(", ") : String(message?.mailbox || fallback || "-");
+}
+
 function saveTextFile(name: string, text: string) {
   const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
   const url = URL.createObjectURL(blob);
@@ -115,8 +126,27 @@ function saveTextFile(name: string, text: string) {
   URL.revokeObjectURL(url);
 }
 
+async function writeClipboardText(value: string) {
+  try {
+    await navigator.clipboard.writeText(value);
+    return;
+  } catch {
+    const textarea = document.createElement("textarea");
+    textarea.value = value;
+    textarea.setAttribute("readonly", "");
+    textarea.style.position = "fixed";
+    textarea.style.left = "-9999px";
+    document.body.appendChild(textarea);
+    textarea.select();
+    const copied = document.execCommand("copy");
+    textarea.remove();
+    if (!copied) throw new Error("clipboard unavailable");
+  }
+}
+
 export function OutlookMailboxInventoryCard({ active = true }: { active?: boolean }) {
   const loadedRef = useRef(false);
+  const fullPoolLoadedRef = useRef(false);
   const [pool, setPool] = useState<MailboxPool | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -132,6 +162,7 @@ export function OutlookMailboxInventoryCard({ active = true }: { active?: boolea
   const [pageSize, setPageSize] = useState(25);
   const [showSecret, setShowSecret] = useState(false);
   const [showImport, setShowImport] = useState(false);
+  const [showOutbound, setShowOutbound] = useState(false);
   const [showGroupCreator, setShowGroupCreator] = useState(false);
   const [importText, setImportText] = useState("");
   const [importGroup, setImportGroup] = useState("默认");
@@ -144,8 +175,14 @@ export function OutlookMailboxInventoryCard({ active = true }: { active?: boolea
   const [messages, setMessages] = useState<MailboxCodeMessage[]>([]);
   const [messageEmail, setMessageEmail] = useState("");
   const [selectedMessageKey, setSelectedMessageKey] = useState("");
+  const [messageDetailOpen, setMessageDetailOpen] = useState(true);
+  const [copiedCode, setCopiedCode] = useState("");
   const [refreshingTokens, setRefreshingTokens] = useState(false);
   const [refreshResults, setRefreshResults] = useState<OutlookTokenRefreshResult[]>([]);
+  const [batches, setBatches] = useState<InventoryBatch[]>([]);
+  const [outboundBatch, setOutboundBatch] = useState("");
+  const [outboundQuantity, setOutboundQuantity] = useState(10);
+  const [outboundFormat, setOutboundFormat] = useState<"credentials" | "json">("credentials");
   const setRegisterConfig = useSettingsStore((state) => state.setRegisterConfig);
 
   const selected = useMemo(() => pool?.items.find((item) => item.email === selectedEmail), [pool, selectedEmail]);
@@ -203,19 +240,15 @@ export function OutlookMailboxInventoryCard({ active = true }: { active?: boolea
   const load = async (silent = false, preview = false) => {
     if (!silent) setLoading(true);
     try {
-      const data = await fetchOutlookMailboxPool({ force: silent, preview });
+      const [data, batchData] = await Promise.all([
+        fetchOutlookMailboxPool({ force: silent, preview }),
+        fetchMailboxBatches().catch(() => ({ batches: [] as InventoryBatch[] })),
+      ]);
       setPool(data.mailboxes);
+      setBatches(batchData.batches);
+      fullPoolLoadedRef.current = !data.mailboxes.page_info?.partial;
       setSelectedEmails((current) => current.filter((email) => data.mailboxes.items.some((item) => item.email === email)));
       setSelectedEmail((current) => current && data.mailboxes.items.some((item) => item.email === current) ? current : data.mailboxes.items[0]?.email || "");
-      if (preview && data.mailboxes.page_info?.partial) {
-        window.setTimeout(() => {
-          void fetchOutlookMailboxPool({ force: true }).then((fullData) => {
-            setPool(fullData.mailboxes);
-            setSelectedEmails((current) => current.filter((email) => fullData.mailboxes.items.some((item) => item.email === email)));
-            setSelectedEmail((current) => current && fullData.mailboxes.items.some((item) => item.email === current) ? current : fullData.mailboxes.items[0]?.email || "");
-          }).catch(() => undefined);
-        }, 600);
-      }
     } catch (error) {
       if (!silent) toast.error(error instanceof Error ? error.message : "加载微软邮箱库存失败");
     } finally {
@@ -228,9 +261,18 @@ export function OutlookMailboxInventoryCard({ active = true }: { active?: boolea
     const firstLoad = !loadedRef.current;
     if (firstLoad) void load(false, true).finally(() => { loadedRef.current = true; });
     else setLoading(false);
-    const timer = window.setInterval(() => void load(true), 15000);
+    const timer = window.setInterval(() => {
+      if (!fullPoolLoadedRef.current) void load(true, true);
+    }, 30000);
     return () => window.clearInterval(timer);
   }, [active]);
+
+  useEffect(() => {
+    const hasActiveFilter = Boolean(query.trim()) || groupFilter !== "all" || stateFilter !== "all";
+    if (!active || loading || !pool?.page_info?.partial || !hasActiveFilter) return;
+    const timer = window.setTimeout(() => { void load(false, false); }, 250);
+    return () => window.clearTimeout(timer);
+  }, [active, groupFilter, loading, pool?.page_info?.partial, query, stateFilter]);
 
   const toggleEmail = (email: string) => setSelectedEmails((current) => current.includes(email) ? current.filter((item) => item !== email) : [...current, email]);
   const togglePage = () => setSelectedEmails((current) => allPageSelected ? current.filter((email) => !pageEmails.includes(email)) : Array.from(new Set([...current, ...pageEmails])));
@@ -405,6 +447,29 @@ export function OutlookMailboxInventoryCard({ active = true }: { active?: boolea
     saveTextFile(`outlook-mailboxes-${Date.now()}.txt`, `${text}\n`);
   };
 
+  const outboundInventory = async () => {
+    setSaving(true);
+    try {
+      const data = await outboundMailboxes({
+        quantity: Math.max(0, outboundQuantity),
+        inventory_batch_id: outboundBatch,
+        provider_type: "outlook_token",
+        format: outboundFormat,
+      });
+      setBatches(data.batches);
+      const payload = typeof data.mailbox_outbound.data === "string"
+        ? data.mailbox_outbound.data
+        : JSON.stringify(data.mailbox_outbound.data, null, 2);
+      saveTextFile(data.mailbox_outbound.filename || `mailboxes-${Date.now()}.txt`, `${payload}\n`);
+      toast.success(`已出库 ${data.mailbox_outbound.count} 个邮箱`);
+      await load(true);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "邮箱出库失败");
+    } finally {
+      setSaving(false);
+    }
+  };
+
   const fetchMessages = async (email = selectedEmail) => {
     if (!email) return toast.error("请先选择邮箱");
     setSelectedEmail(email);
@@ -417,11 +482,25 @@ export function OutlookMailboxInventoryCard({ active = true }: { active?: boolea
       setMessages(nextMessages);
       setMessageEmail(email);
       setSelectedMessageKey(nextMessages.length ? messageKey(nextMessages[0], 0) : "");
+      setMessageDetailOpen(Boolean(nextMessages.length));
       toast.success(`已读取 ${data.mailbox_messages.count || 0} 封最近邮件`);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "读取微软邮箱失败");
     } finally {
       setMailLoading(false);
+    }
+  };
+
+  const copyVerificationCode = async (code?: string) => {
+    const value = String(code || "").trim();
+    if (!value) return;
+    try {
+      await writeClipboardText(value);
+      setCopiedCode(value);
+      toast.success(`验证码 ${value} 已复制`);
+      window.setTimeout(() => setCopiedCode((current) => current === value ? "" : current), 1600);
+    } catch {
+      toast.error("验证码复制失败");
     }
   };
 
@@ -489,14 +568,18 @@ export function OutlookMailboxInventoryCard({ active = true }: { active?: boolea
           <Button variant="outline" className="h-9 rounded-lg px-3" onClick={exportSelected} disabled={!selectedEmails.length}>
             <Download className="size-4" />导出
           </Button>
+          <Button variant="outline" className="h-9 rounded-lg px-3" onClick={() => setShowOutbound((value) => !value)}>
+            <Download className="size-4" />库存出库
+          </Button>
           <Button variant="outline" className="h-9 rounded-lg px-3" onClick={() => void refreshTokens(selectedEmails)} disabled={refreshingTokens || !selectedEmails.length}>
             {refreshingTokens ? <LoaderCircle className="size-4 animate-spin" /> : <KeyRound className="size-4" />}刷新 Token
           </Button>
           <Button variant="outline" className="size-9 rounded-lg p-0" onClick={() => setShowSecret((value) => !value)} title={showSecret ? "隐藏凭据" : "显示凭据"} aria-label={showSecret ? "隐藏凭据" : "显示凭据"}>
             {showSecret ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
           </Button>
-          <Button variant="outline" className="size-9 rounded-lg p-0" onClick={() => void load()} disabled={loading || saving} title="刷新库存" aria-label="刷新库存">
+          <Button variant="outline" className={pool?.page_info?.partial ? "h-9 rounded-lg px-3 text-xs" : "size-9 rounded-lg p-0"} onClick={() => void load()} disabled={loading || saving} title={pool?.page_info?.partial ? `加载全部 ${pool.page_info.total} 个邮箱` : "刷新库存"} aria-label={pool?.page_info?.partial ? "加载全部邮箱" : "刷新库存"}>
             <RefreshCw className={`size-4 ${loading ? "animate-spin" : ""}`} />
+            {pool?.page_info?.partial ? `加载全部 ${pool.page_info.total}` : null}
           </Button>
         </div>
       </header>
@@ -521,8 +604,36 @@ export function OutlookMailboxInventoryCard({ active = true }: { active?: boolea
         </div>
       ) : null}
 
-      <div className="grid min-h-0 xl:min-h-[780px] xl:grid-cols-[180px_minmax(280px,0.9fr)_minmax(300px,1.35fr)]">
-        <aside className="flex min-h-[420px] flex-col border-b border-slate-200 bg-slate-50/60 xl:min-h-0 xl:border-b-0 xl:border-r">
+      {showOutbound ? (
+        <div className="grid gap-3 border-b border-slate-200 bg-emerald-50/60 p-4 md:grid-cols-[minmax(240px,1fr)_120px_150px_auto]">
+          <label className="space-y-1.5">
+            <span className="text-xs font-semibold text-slate-600">导入批次</span>
+            <select value={outboundBatch} onChange={(event) => setOutboundBatch(event.target.value)} className="h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm">
+              <option value="">全部未出库邮箱</option>
+              {batches.map((batch) => <option key={batch.id} value={batch.id}>{batch.id} · 可出 {batch.available}/{batch.total}</option>)}
+            </select>
+          </label>
+          <label className="space-y-1.5">
+            <span className="text-xs font-semibold text-slate-600">出库数量</span>
+            <Input type="number" min={0} value={outboundQuantity} onChange={(event) => setOutboundQuantity(Math.max(0, Number(event.target.value) || 0))} className="h-10 bg-white" />
+          </label>
+          <label className="space-y-1.5">
+            <span className="text-xs font-semibold text-slate-600">导出格式</span>
+            <select value={outboundFormat} onChange={(event) => setOutboundFormat(event.target.value as "credentials" | "json")} className="h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm">
+              <option value="credentials">邮箱凭据文本</option>
+              <option value="json">完整 JSON</option>
+            </select>
+          </label>
+          <div className="flex items-end">
+            <Button className="h-10 bg-emerald-700 text-white hover:bg-emerald-800" onClick={() => void outboundInventory()} disabled={saving}>
+              {saving ? <LoaderCircle className="size-4 animate-spin" /> : <Download className="size-4" />}确认出库
+            </Button>
+          </div>
+        </div>
+      ) : null}
+
+      <div className="grid min-h-0 xl:h-[clamp(540px,calc(100vh-220px),640px)] xl:grid-cols-[180px_minmax(280px,0.9fr)_minmax(300px,1.35fr)] xl:overflow-hidden">
+        <aside className="flex h-[320px] min-h-0 flex-col border-b border-slate-200 bg-slate-50/60 xl:h-auto xl:border-b-0 xl:border-r">
           <div className="flex items-center justify-between border-b border-slate-200 px-4 py-3">
             <div className="flex items-center gap-2 text-sm font-bold text-slate-900"><FolderCog className="size-4 text-sky-600" />分组</div>
             <Button variant="outline" className="size-8 rounded-lg p-0" onClick={() => setShowGroupCreator((value) => !value)} title="新建分组" aria-label="新建分组">
@@ -543,7 +654,7 @@ export function OutlookMailboxInventoryCard({ active = true }: { active?: boolea
             ) : null}
           </div>
 
-          <div className="min-h-0 flex-1 overflow-auto py-2">
+          <div className="min-h-0 flex-1 overflow-auto overscroll-contain py-2 [scrollbar-gutter:stable]">
             <button
               type="button"
               onClick={() => selectGroup("all")}
@@ -582,7 +693,7 @@ export function OutlookMailboxInventoryCard({ active = true }: { active?: boolea
           </div>
         </aside>
 
-        <section className="flex min-h-[620px] min-w-0 flex-col border-b border-slate-200 xl:min-h-0 xl:border-b-0 xl:border-r">
+        <section className="flex h-[560px] min-h-0 min-w-0 flex-col border-b border-slate-200 xl:h-auto xl:border-b-0 xl:border-r">
           <div className="border-b border-slate-200 px-4 py-3">
             <div className="flex items-center justify-between gap-3">
               <div className="min-w-0">
@@ -611,7 +722,7 @@ export function OutlookMailboxInventoryCard({ active = true }: { active?: boolea
             <span>第 {currentPage}/{totalPages} 页</span>
           </div>
 
-          <div className="min-h-0 flex-1 overflow-auto">
+          <div className="min-h-0 flex-1 overflow-auto overscroll-contain [scrollbar-gutter:stable]" data-testid="mailbox-list-scroll">
             {loading ? <div className="flex min-h-48 items-center justify-center text-sm text-slate-500"><LoaderCircle className="mr-2 size-5 animate-spin" />正在加载邮箱库存</div> : null}
             {!loading && !pageItems.length ? <div className="flex min-h-48 flex-col items-center justify-center gap-2 text-sm text-slate-500"><Mail className="size-7 text-slate-300" />当前分组没有匹配邮箱</div> : null}
             {pageItems.map((item) => {
@@ -632,6 +743,7 @@ export function OutlookMailboxInventoryCard({ active = true }: { active?: boolea
                         <span className="mt-1 flex flex-wrap items-center gap-2 text-xs text-slate-500">
                           <span className="rounded bg-slate-100 px-1.5 py-0.5 font-semibold text-slate-600">Outlook</span>
                           <span className={`rounded px-1.5 py-0.5 font-semibold ${tokenOk ? "bg-emerald-50 text-emerald-700" : tokenFailed ? "bg-rose-50 text-rose-700" : "bg-slate-100 text-slate-500"}`}>{tokenOk ? item.token_refresh_mode || "Token 有效" : tokenFailed ? "Token 失败" : "Token 未检查"}</span>
+                          <span className="rounded bg-violet-50 px-1.5 py-0.5 font-semibold text-violet-700">分裂 {item.split_alias_generated || 0} · 成功 {item.split_alias_used || 0}</span>
                           <span>{formatTime(item.token_refreshed_at || item.updated_at)}</span>
                         </span>
                         {viewMode === "standard" && (item.state_reason || item.token_refresh_error) ? <span className="mt-2 block line-clamp-2 text-xs leading-5 text-slate-500">{item.state_reason || item.token_refresh_error}</span> : null}
@@ -669,7 +781,7 @@ export function OutlookMailboxInventoryCard({ active = true }: { active?: boolea
           </div>
         </section>
 
-        <section className="flex min-h-[720px] min-w-0 flex-col xl:min-h-0">
+        <section className="flex h-[620px] min-h-0 min-w-0 flex-col xl:h-auto" data-testid="mailbox-inbox-pane">
           <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 px-4 py-3">
             <div className="flex items-center gap-1">
               <button type="button" className="flex h-9 items-center gap-2 border-b-2 border-sky-600 px-3 text-sm font-bold text-sky-700"><Inbox className="size-4" />收件箱</button>
@@ -686,7 +798,7 @@ export function OutlookMailboxInventoryCard({ active = true }: { active?: boolea
               <div className="flex min-w-0 items-center justify-between gap-3">
                 <div className="min-w-0">
                   <div className="truncate text-sm font-semibold text-slate-900">当前邮箱：{selected.email}</div>
-                  <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-slate-500"><span>{groupName(selected)}</span><span>·</span><span>{stateText[selected.state] || selected.state}</span>{messageEmail === selected.email ? <><span>·</span><span>{messages.length} 封邮件</span></> : null}</div>
+                  <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-slate-500"><span>{groupName(selected)}</span><span>·</span><span>{stateText[selected.state] || selected.state}</span><span>·</span><span>已生成分裂邮箱 {selected.split_alias_generated || 0} 个</span>{messageEmail === selected.email ? <><span>·</span><span>{messages.length} 封邮件</span></> : null}</div>
                 </div>
                 <Badge variant={stateVariant(selected.state)} className="shrink-0 rounded-md">{stateText[selected.state] || selected.state}</Badge>
               </div>
@@ -706,8 +818,8 @@ export function OutlookMailboxInventoryCard({ active = true }: { active?: boolea
             </div>
           ) : null}
 
-          <div className="grid min-h-0 flex-1 grid-rows-[minmax(300px,1.05fr)_minmax(280px,0.95fr)]">
-            <div className="min-h-0 overflow-auto border-b border-slate-200">
+          <div className="flex min-h-0 flex-1 flex-col">
+            <div className="min-h-[260px] flex-1 overflow-auto overscroll-contain [scrollbar-gutter:stable] xl:min-h-0" data-testid="message-list-scroll">
               {mailLoading ? <div className="flex h-full min-h-64 items-center justify-center text-sm text-slate-500"><LoaderCircle className="mr-2 size-5 animate-spin" />正在获取最近邮件</div> : null}
               {!mailLoading && !messageEmail ? <div className="flex h-full min-h-64 flex-col items-center justify-center gap-3 text-sm text-slate-500"><MailOpen className="size-8 text-slate-300" />选择邮箱后获取邮件</div> : null}
               {!mailLoading && messageEmail && !messages.length ? <div className="flex h-full min-h-64 flex-col items-center justify-center gap-3 text-sm text-slate-500"><Inbox className="size-8 text-slate-300" />没有读取到最近邮件</div> : null}
@@ -715,39 +827,87 @@ export function OutlookMailboxInventoryCard({ active = true }: { active?: boolea
                 const key = messageKey(message, index);
                 const active = selectedMessage ? messageKey(selectedMessage, messages.indexOf(selectedMessage)) === key : false;
                 return (
-                  <button key={key} type="button" onClick={() => setSelectedMessageKey(key)} className={`flex w-full gap-3 border-b border-slate-100 px-4 py-3 text-left last:border-b-0 ${active ? "bg-sky-50" : "bg-white hover:bg-slate-50"}`}>
-                    <span className={`flex size-9 shrink-0 items-center justify-center rounded-full text-sm font-bold ${avatarStyle(message.sender || message.subject || key)}`}>{(message.sender || "M").charAt(0).toUpperCase()}</span>
-                    <span className="min-w-0 flex-1">
-                      <span className="flex items-start justify-between gap-3">
-                        <span className="truncate text-sm font-semibold text-slate-900">{message.sender || "未知发件人"}</span>
-                        <span className="shrink-0 text-xs text-slate-400">{formatTime(message.received_at)}</span>
+                  <div key={key} className={`flex w-full items-center gap-3 border-b border-slate-100 px-4 py-3 last:border-b-0 ${active ? "bg-sky-50" : "bg-white hover:bg-slate-50"}`}>
+                    <button type="button" onClick={() => { setSelectedMessageKey(key); setMessageDetailOpen(true); }} className="flex min-w-0 flex-1 gap-3 text-left">
+                      <span className={`flex size-9 shrink-0 items-center justify-center rounded-full text-sm font-bold ${avatarStyle(message.sender || message.subject || key)}`}>{(message.sender || "M").charAt(0).toUpperCase()}</span>
+                      <span className="min-w-0 flex-1">
+                        <span className="flex items-start justify-between gap-3">
+                          <span className="truncate text-sm font-semibold text-slate-900">{message.sender || "未知发件人"}</span>
+                          <span className="shrink-0 text-xs text-slate-400">{formatTime(message.received_at)}</span>
+                        </span>
+                        <span className="mt-1 block truncate text-sm text-slate-700">{message.subject || "无主题"}</span>
+                        <span className="mt-1 block truncate text-xs text-slate-500">{message.body_preview || "-"}</span>
                       </span>
-                      <span className="mt-1 block truncate text-sm text-slate-700">{message.subject || "无主题"}</span>
-                      <span className="mt-1 block truncate text-xs text-slate-500">{message.body_preview || "-"}</span>
-                    </span>
-                    {message.code ? <Badge variant="success" className="shrink-0 rounded-md">{message.code}</Badge> : null}
-                  </button>
+                    </button>
+                    {message.code ? (
+                      <button
+                        type="button"
+                        onClick={() => void copyVerificationCode(message.code)}
+                        className="flex h-12 min-w-24 shrink-0 items-center justify-center gap-1.5 rounded-md border border-emerald-200 bg-emerald-50 px-3 font-mono text-xs font-semibold text-emerald-700 transition-colors hover:border-emerald-300 hover:bg-emerald-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
+                        title="点击复制验证码"
+                        aria-label={`复制验证码 ${message.code}`}
+                        data-testid="mail-code-copy"
+                      >
+                        {copiedCode === message.code ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
+                        {message.code}
+                      </button>
+                    ) : null}
+                  </div>
                 );
               })}
             </div>
 
-            <div className="min-h-0 overflow-auto bg-slate-50/40 p-4">
+            <div className="shrink-0 border-t border-slate-200 bg-slate-50/70" data-testid="mail-detail-panel">
               {!selectedMessage ? (
-                <div className="flex h-full min-h-60 flex-col items-center justify-center gap-3 text-sm text-slate-500"><Mail className="size-8 text-slate-300" />选择一封邮件查看详情</div>
+                <div className="flex h-12 items-center gap-2 px-4 text-sm text-slate-500"><Mail className="size-4 text-slate-400" />选择一封邮件查看详情</div>
               ) : (
-                <article className="mx-auto max-w-3xl">
-                  <div className="flex flex-wrap items-start justify-between gap-3 border-b border-slate-200 pb-3">
-                    <div className="min-w-0">
-                      <h4 className="break-words text-base font-bold text-slate-950">{selectedMessage.subject || "无主题"}</h4>
-                      <div className="mt-2 text-xs text-slate-500"><span className="font-semibold text-slate-700">{selectedMessage.sender || "未知发件人"}</span><span className="mx-2">·</span>{formatTime(selectedMessage.received_at)}</div>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <Badge variant="secondary" className="rounded-md">{selectedMessage.provider || mailMode}</Badge>
-                      {selectedMessage.code ? <Button variant="outline" className="h-8 rounded-lg px-2 text-xs" onClick={() => { void navigator.clipboard.writeText(selectedMessage.code || ""); toast.success("验证码已复制"); }}><Copy className="size-3.5" />{selectedMessage.code}</Button> : null}
-                    </div>
+                <>
+                  <div className="flex min-h-14 items-center gap-2 px-4 py-2">
+                    <button type="button" onClick={() => setMessageDetailOpen((value) => !value)} className="flex min-w-0 flex-1 items-center gap-3 text-left" aria-expanded={messageDetailOpen}>
+                      <span className="flex size-8 shrink-0 items-center justify-center rounded-md bg-white text-slate-500 shadow-sm"><Mail className="size-4" /></span>
+                      <span className="min-w-0 flex-1">
+                        <span className="block text-[11px] font-semibold text-slate-500">邮件详情</span>
+                        <span className="block truncate text-sm font-bold text-slate-900">{selectedMessage.subject || "无主题"}</span>
+                      </span>
+                    </button>
+                    <Badge variant="secondary" className="hidden shrink-0 rounded-md sm:inline-flex">{selectedMessage.provider || mailMode}</Badge>
+                    {selectedMessage.code ? (
+                      <button
+                        type="button"
+                        onClick={() => void copyVerificationCode(selectedMessage.code)}
+                        className="flex h-9 shrink-0 items-center gap-1.5 rounded-md border border-emerald-200 bg-emerald-50 px-2.5 font-mono text-xs font-semibold text-emerald-700 hover:bg-emerald-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
+                        title="点击复制验证码"
+                      >
+                        {copiedCode === selectedMessage.code ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
+                        {selectedMessage.code}
+                      </button>
+                    ) : null}
+                    <button type="button" onClick={() => setMessageDetailOpen((value) => !value)} className="flex size-8 shrink-0 items-center justify-center rounded-md text-slate-500 hover:bg-white hover:text-slate-900" title={messageDetailOpen ? "收起邮件详情" : "展开邮件详情"} aria-label={messageDetailOpen ? "收起邮件详情" : "展开邮件详情"}>
+                      {messageDetailOpen ? <ChevronDown className="size-4" /> : <ChevronUp className="size-4" />}
+                    </button>
                   </div>
-                  <div className="whitespace-pre-wrap break-words py-4 text-sm leading-7 text-slate-700">{selectedMessage.body_preview || "无正文摘要"}</div>
-                </article>
+                  {messageDetailOpen ? (
+                    <article className="max-h-[240px] overflow-auto overscroll-contain border-t border-slate-200 bg-white px-4 py-4 [scrollbar-gutter:stable]">
+                      <div className="mx-auto max-w-4xl">
+                        <div className="border-b border-slate-200 pb-4 text-xs">
+                          <dl className="grid min-w-0 grid-cols-[52px_minmax(0,1fr)] gap-x-2 gap-y-2">
+                            <dt className="font-semibold text-slate-400">发件人</dt>
+                            <dd className="break-all font-medium text-slate-800">{selectedMessage.sender || "未知发件人"}</dd>
+                            <dt className="font-semibold text-slate-400">收件人</dt>
+                            <dd className="break-all text-slate-700">{messageRecipients(selectedMessage, messageEmail || selected?.email)}</dd>
+                          </dl>
+                          <div className="mt-3 grid min-w-0 grid-cols-[52px_minmax(0,1fr)] gap-x-2 gap-y-2 text-slate-500">
+                            <span className="font-semibold text-slate-400">时间</span>
+                            <span>{formatTime(selectedMessage.received_at)}</span>
+                            <span className="font-semibold text-slate-400">消息 ID</span>
+                            <span className="break-all font-mono text-[11px] text-slate-400">{selectedMessage.message_id || "-"}</span>
+                          </div>
+                        </div>
+                        <div className="whitespace-pre-wrap break-words pt-4 text-sm leading-7 text-slate-700">{selectedMessage.body_text || selectedMessage.body_preview || "无正文内容"}</div>
+                      </div>
+                    </article>
+                  ) : null}
+                </>
               )}
             </div>
           </div>

@@ -82,12 +82,14 @@ sh deploy_server.sh
 
 ## 数据与安全
 
-- 运行数据：`data/`，Docker 部署为 `runtime/data/`。
+- 运行数据：默认写入 `data/moyu.sqlite3`，Docker 部署为 `runtime/data/moyu.sqlite3`。
+- 第一次启用 SQLite 时会自动迁移现有 `data/*.json`，并为每个迁移源保留 `*.pre-sqlite.bak`；旧 JSON 不再作为写入目标。
 - 登录配置：`config.json`，Docker 部署为 `runtime/config.json`。
 - 日志：`logs/`，Docker 部署为 `runtime/logs/`。
 - 上述目录均被 Git 与干净发布脚本排除。
 - Git 更新仅执行 `fetch` 和 `merge --ff-only`；工作区有未提交修改时会拒绝更新。
 - 一键重置只恢复系统监控参数，保留密钥、账号、邮箱与代理库存。
+- 系统设置的概览接口会返回当前存储后端、数据库大小、文档数和库存行数。
 
 安全边界和公开部署要求见 [SECURITY.md](SECURITY.md)，使用边界见 [DISCLAIMER.md](DISCLAIMER.md)。
 
