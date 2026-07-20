@@ -80,18 +80,13 @@ def _status_code_from_response(data: bytes) -> int:
         return 0
 
 
-def _connect_direct(host: str, port: int, timeout: float = CONNECT_TIMEOUT) -> socket.socket:
-    return socket.create_connection((host, int(port)), timeout=timeout)
+def _connect_direct(host: str, port: int) -> socket.socket:
+    return socket.create_connection((host, int(port)), timeout=CONNECT_TIMEOUT)
 
 
-def _connect_via_http_proxy(
-    parent: ProxyEndpoint,
-    host: str,
-    port: int,
-    timeout: float = CONNECT_TIMEOUT,
-) -> socket.socket:
-    sock = _connect_direct(parent.host, parent.port, timeout)
-    sock.settimeout(timeout)
+def _connect_via_http_proxy(parent: ProxyEndpoint, host: str, port: int) -> socket.socket:
+    sock = _connect_direct(parent.host, parent.port)
+    sock.settimeout(CONNECT_TIMEOUT)
     target = f"{host}:{int(port)}"
     request = (
         f"CONNECT {target} HTTP/1.1\r\n"
@@ -119,14 +114,9 @@ def _socks5_read_exact(sock: socket.socket, size: int) -> bytes:
     return data
 
 
-def _connect_via_socks5(
-    parent: ProxyEndpoint,
-    host: str,
-    port: int,
-    timeout: float = CONNECT_TIMEOUT,
-) -> socket.socket:
-    sock = _connect_direct(parent.host, parent.port, timeout)
-    sock.settimeout(timeout)
+def _connect_via_socks5(parent: ProxyEndpoint, host: str, port: int) -> socket.socket:
+    sock = _connect_direct(parent.host, parent.port)
+    sock.settimeout(CONNECT_TIMEOUT)
     if parent.username:
         sock.sendall(b"\x05\x02\x00\x02")
         method = _socks5_read_exact(sock, 2)
@@ -166,75 +156,10 @@ def _connect_via_socks5(
     return sock
 
 
-def _connect_to_upstream_proxy(
-    upstream: ProxyEndpoint,
-    parent: ProxyEndpoint,
-    timeout: float = CONNECT_TIMEOUT,
-) -> socket.socket:
+def _connect_to_upstream_proxy(upstream: ProxyEndpoint, parent: ProxyEndpoint) -> socket.socket:
     if parent.scheme.startswith("socks"):
-        return _connect_via_socks5(parent, upstream.host, upstream.port, timeout)
-    return _connect_via_http_proxy(parent, upstream.host, upstream.port, timeout)
-
-
-def probe_proxy_chain(
-    upstream_proxy: str,
-    parent_proxy: str,
-    *,
-    target_host: str = "cloudflare.com",
-    target_port: int = 443,
-    timeout: float = 12,
-) -> dict[str, Any]:
-    """Verify parent -> upstream proxy -> HTTPS target without sending application data."""
-    started_at = time.monotonic()
-    upstream = _parse_proxy(upstream_proxy, default_scheme="http")
-    parent = _parse_proxy(parent_proxy, default_scheme="http")
-    if upstream.scheme not in {"http", "https"}:
-        return {
-            "ok": False,
-            "status_code": 0,
-            "error": f"暂不支持探测 {upstream.scheme} 住宅代理链",
-        }
-    sock: socket.socket | None = None
-    try:
-        sock = _connect_to_upstream_proxy(upstream, parent, max(2, float(timeout)))
-        sock.settimeout(max(2, float(timeout)))
-        target = f"{str(target_host or 'cloudflare.com').strip()}:{int(target_port or 443)}"
-        request = (
-            f"CONNECT {target} HTTP/1.1\r\n"
-            f"Host: {target}\r\n"
-            f"{_basic_auth_header(upstream)}"
-            "Proxy-Connection: close\r\n"
-            "\r\n"
-        ).encode("iso-8859-1", errors="ignore")
-        sock.sendall(request)
-        response, _rest = _read_until(sock)
-        status_code = _status_code_from_response(response)
-        if status_code < 200 or status_code >= 300:
-            detail = f"住宅代理 CONNECT {target} 未返回状态" if not status_code else f"住宅代理 CONNECT {target} 返回 HTTP {status_code}"
-            return {
-                "ok": False,
-                "status_code": status_code,
-                "error": detail,
-                "latency_ms": max(1, int((time.monotonic() - started_at) * 1000)),
-            }
-        return {
-            "ok": True,
-            "status_code": status_code,
-            "latency_ms": max(1, int((time.monotonic() - started_at) * 1000)),
-        }
-    except Exception as error:
-        return {
-            "ok": False,
-            "status_code": 0,
-            "error": " ".join(str(error).split())[:300],
-            "latency_ms": max(1, int((time.monotonic() - started_at) * 1000)),
-        }
-    finally:
-        if sock is not None:
-            try:
-                sock.close()
-            except OSError:
-                pass
+        return _connect_via_socks5(parent, upstream.host, upstream.port)
+    return _connect_via_http_proxy(parent, upstream.host, upstream.port)
 
 
 def _relay(left: socket.socket, right: socket.socket) -> None:
@@ -379,7 +304,6 @@ class _ChainEntry:
     thread: threading.Thread
     created_at: float
     last_used_at: float
-    leases: int = 0
 
     @property
     def url(self) -> str:
@@ -401,7 +325,6 @@ class ProxyChainManager:
             entry = self._entries.get(key)
             if entry:
                 entry.last_used_at = time.time()
-                entry.leases += 1
                 return entry.url
             server = _ChainServer(("127.0.0.1", 0), upstream, parent)
             thread = threading.Thread(target=server.serve_forever, name=f"proxy-chain-{server.server_address[1]}", daemon=True)
@@ -414,40 +337,13 @@ class ProxyChainManager:
                 thread=thread,
                 created_at=time.time(),
                 last_used_at=time.time(),
-                leases=1,
             )
             self._entries[key] = entry
             return entry.url
 
-    def release(self, local_proxy: str) -> None:
-        local_proxy = str(local_proxy or "").strip()
-        if not local_proxy:
-            return
-        entry: _ChainEntry | None = None
-        with self._lock:
-            for key, candidate in self._entries.items():
-                if candidate.url != local_proxy:
-                    continue
-                candidate.leases = max(0, candidate.leases - 1)
-                candidate.last_used_at = time.time()
-                if candidate.leases == 0:
-                    entry = self._entries.pop(key, None)
-                break
-        if entry is not None:
-            try:
-                entry.server.shutdown()
-                entry.server.server_close()
-                entry.thread.join(timeout=2)
-            except Exception:
-                pass
-
     def _cleanup_locked(self) -> None:
         now = time.time()
-        stale_keys = [
-            key
-            for key, entry in self._entries.items()
-            if entry.leases == 0 and now - entry.last_used_at > 5 * 60
-        ]
+        stale_keys = [key for key, entry in self._entries.items() if now - entry.last_used_at > 2 * 60 * 60]
         for key in stale_keys:
             entry = self._entries.pop(key, None)
             if not entry:
@@ -468,7 +364,6 @@ class ProxyChainManager:
                         "upstream_proxy_hash": hashlib.sha256(entry.upstream_url.encode("utf-8", errors="ignore")).hexdigest()[:12],
                         "parent_proxy": entry.parent_url,
                         "last_used_at": entry.last_used_at,
-                        "leases": entry.leases,
                     }
                     for entry in self._entries.values()
                 ],

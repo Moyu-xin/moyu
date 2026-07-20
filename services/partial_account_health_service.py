@@ -14,13 +14,6 @@ from services.config import DATA_DIR
 
 PARTIAL_HEALTH_SETTINGS_FILE = DATA_DIR / "partial_account_health_settings.json"
 _check_lock = threading.Lock()
-UNVERIFIABLE_HEALTH_STATUSES = {
-    "browser_check_required",
-    "missing_registration_proxy",
-    "missing_sub2api_id",
-    "missing_token",
-    "skipped",
-}
 
 
 def _now() -> str:
@@ -119,35 +112,9 @@ def _run_one(
                     "health_method": "sub2api",
                 },
             }
-    elif method in {"auto", "local"} and not any(
-        str(account.get(key) or "").strip() for key in ("access_token", "refresh_token")
-    ):
-        browser_only = str(account.get("source") or "").strip().lower() == "browser_ui_chatgpt"
-        status = "browser_check_required" if browser_only else "missing_token"
-        error = "浏览器注册账号未保存 Token，需要使用原浏览器会话测活" if browser_only else "缺少 access_token 和 refresh_token，无法执行本地 Token 测活"
-        result = {
-            "ok": False,
-            "quota_ok": False,
-            "method": "browser" if browser_only else "local",
-            "status": status,
-            "status_code": 0,
-            "error": error,
-            "updates": {
-                "health_status": status,
-                "health_error": error,
-                "health_checked_at": _now(),
-                "health_method": "browser_required" if browser_only else "local",
-            },
-        }
 
     if result:
-        result_method = str(result.get("method") or "").strip().lower()
-        assignment = {
-            "source": "sub2api" if result_method == "sub2api" else "none",
-            "label": "sub2api" if result_method == "sub2api" else "",
-            "node_id": "",
-            "sticky": False,
-        }
+        assignment = {"source": "sub2api", "label": "sub2api", "node_id": "", "sticky": False}
 
     for attempt in range(1, 4) if not result else []:
         assignment = proxy_pool_store.assign_proxy(
@@ -160,16 +127,15 @@ def _run_one(
         )
         if assignment.get("sticky_failure"):
             error = str(assignment.get("error") or "注册代理节点不可用")
-            status = "missing_registration_proxy" if assignment.get("legacy_proxy") else "proxy_error"
             result = {
                 "ok": False,
                 "quota_ok": False,
                 "method": "local",
-                "status": status,
+                "status": "network_error",
                 "status_code": 0,
                 "error": error[:800],
                 "updates": {
-                    "health_status": status,
+                    "health_status": "network_error",
                     "health_error": error[:800],
                     "health_checked_at": datetime.now(timezone.utc).isoformat(),
                     "health_method": "local",
@@ -331,11 +297,6 @@ def _check_partial_accounts_unlocked(
         for item in results
         if str(item.get("status") or "").lower() in partial_account_store.TERMINAL_HEALTH_STATUSES
     )
-    unverifiable = sum(
-        1
-        for item in results
-        if str(item.get("status") or "").lower() in UNVERIFIABLE_HEALTH_STATUSES
-    )
     return {
         "ok": True,
         "stopped": bool(stop_event and stop_event.is_set()),
@@ -343,8 +304,7 @@ def _check_partial_accounts_unlocked(
             "total": len(results),
             "alive": alive,
             "dead": dead,
-            "unverifiable": unverifiable,
-            "failed": max(0, len(results) - alive - dead - unverifiable),
+            "failed": max(0, len(results) - alive - dead),
             "quota_ok": quota_ok,
             "quota_failed": max(0, len(results) - quota_ok),
         },

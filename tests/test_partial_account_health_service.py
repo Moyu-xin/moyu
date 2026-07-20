@@ -43,7 +43,7 @@ class PartialAccountHealthServiceTests(unittest.TestCase):
         ):
             result = partial_account_health_service.check_partial_accounts(["partial-1"], concurrency=1)
 
-        self.assertEqual(result["stats"], {"total": 1, "alive": 1, "dead": 0, "unverifiable": 0, "failed": 0, "quota_ok": 0, "quota_failed": 1})
+        self.assertEqual(result["stats"], {"total": 1, "alive": 1, "dead": 0, "failed": 0, "quota_ok": 0, "quota_failed": 1})
         assign_proxy.assert_called_once()
         self.assertEqual(check.call_args.kwargs["proxy"], "http://127.0.0.1:42000")
         updates = update.call_args.args[1]
@@ -56,7 +56,6 @@ class PartialAccountHealthServiceTests(unittest.TestCase):
         account = {
             "id": "partial-dead",
             "email": "dead@example.com",
-            "access_token": "dead-access-token",
             "status": "oauth_failed",
             "registered_at": "2026-07-13T12:00:00+00:00",
         }
@@ -86,7 +85,7 @@ class PartialAccountHealthServiceTests(unittest.TestCase):
         self.assertEqual(updates["died_at"], "2026-07-14T12:00:00+00:00")
         self.assertNotIn("status", updates)
 
-    def test_legacy_sticky_proxy_failure_is_unverifiable(self) -> None:
+    def test_sticky_proxy_failure_does_not_run_health_check_directly(self) -> None:
         account = {
             "id": "partial-sticky",
             "email": "sticky@example.com",
@@ -103,7 +102,6 @@ class PartialAccountHealthServiceTests(unittest.TestCase):
             "label": "registered-node",
             "sticky": True,
             "sticky_failure": True,
-            "legacy_proxy": True,
             "error": "registered node unavailable",
         }
         with (
@@ -117,43 +115,11 @@ class PartialAccountHealthServiceTests(unittest.TestCase):
             result = partial_account_health_service.check_partial_accounts(["partial-sticky"], concurrency=1)
 
         check.assert_not_called()
-        self.assertEqual(result["results"][0]["status"], "missing_registration_proxy")
-        self.assertEqual(result["stats"]["unverifiable"], 1)
-        self.assertEqual(result["stats"]["failed"], 0)
+        self.assertEqual(result["results"][0]["status"], "network_error")
         self.assertEqual(assign_proxy.call_args.kwargs["account"]["registration_proxy"], account["registration_proxy"])
         updates = update.call_args.args[1]
         self.assertTrue(updates["health_proxy_sticky"])
         self.assertIn("registered node unavailable", updates["health_error"])
-
-    def test_browser_account_without_tokens_requires_browser_check(self) -> None:
-        account = {
-            "id": "partial-browser",
-            "email": "browser@example.com",
-            "source": "browser_ui_chatgpt",
-            "status": "oauth_missing",
-            "health_status": "alive",
-            "health_checked_at": "2026-07-19T15:19:12+00:00",
-            "health_method": "browser_reload",
-        }
-        with (
-            patch.object(partial_account_health_service.partial_account_store, "list_partial_accounts", return_value=[account]),
-            patch.object(partial_account_health_service.proxy_pool_store, "get_proxy_pool_config", return_value={"enabled": False}),
-            patch.object(partial_account_health_service.proxy_pool_store, "assign_proxy") as assign_proxy,
-            patch.object(partial_account_health_service, "_local_health_and_quota") as check,
-            patch.object(partial_account_health_service.partial_account_store, "update_partial_account") as update,
-            patch.object(partial_account_health_service.partial_account_store, "partial_account_pool", return_value={"items": [], "stats": {}}),
-        ):
-            result = partial_account_health_service.check_partial_accounts(["partial-browser"], concurrency=1)
-
-        assign_proxy.assert_not_called()
-        check.assert_not_called()
-        self.assertEqual(result["results"][0]["status"], "browser_check_required")
-        self.assertEqual(result["stats"]["unverifiable"], 1)
-        self.assertEqual(result["stats"]["failed"], 0)
-        updates = update.call_args.args[1]
-        self.assertEqual(updates["health_status"], "alive")
-        self.assertEqual(updates["last_health_attempt_status"], "browser_check_required")
-        self.assertEqual(updates["health_proxy_source"], "none")
 
     def test_transient_failure_preserves_last_confirmed_alive_status(self) -> None:
         account = {

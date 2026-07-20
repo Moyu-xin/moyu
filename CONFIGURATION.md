@@ -48,7 +48,5 @@
 | `CHATGPT2API_PORT` | `8000` | 服务端口 |
 | `CHATGPT2API_CONFIG_FILE` | `config.json` | 配置文件路径 |
 | `CHATGPT2API_DATA_DIR` | `data/` | 数据目录 |
-| `STORAGE_BACKEND` | `sqlite` | 数据存储后端；`json` 仅用于兼容诊断，不会同步 SQLite 中的新写入 |
-| `CHATGPT2API_SQLITE_PATH` | `data/moyu.sqlite3` | SQLite 数据库文件路径 |
 | `CHATGPT2API_LOG_DIR` | `logs/` | 日志目录 |
 | `CHATGPT2API_INITIAL_AUTH_KEY` | `moyu666` | Docker 首次生成密钥 |

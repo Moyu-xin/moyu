@@ -20,7 +20,6 @@ function defaultConfigs(): MailProviderConfigs {
     gmail_oauth: { enable: true, mode: "imap", imap_host: "imap.gmail.com", message_limit: 20, split_aliases: true, split_count_per_mailbox: 0 },
     ddg_mail: { enable: false, ddg_token: "", api_base: "", cf_inbox_jwt: "", admin_password: "", cf_api_key: "", cf_auth_mode: "none", cf_domain: "", cf_create_path: "/admin/new_address", cf_messages_path: "/api/mails" },
     duckmail: { enable: false, api_key: "", default_domain: "duckmail.sbs" },
-    yyds_mail: { enable: false, api_base: "https://maliapi.215.im/v1", api_key: "", domain: "", subdomain: "", wildcard: false },
     openai_cpa: { enable: false, domains: "", webhook_secret: "", use_original_password_flow: false, suffix_mode: "fixed", suffix_len_min: 8, suffix_len_max: 8, enable_domain_grouping: false, domain_group_count: 2, domain_group_strategy: "round_robin", domain_fail_threshold: 3, domain_fail_cooldown_sec: 600, disabled_domains: "", enable_multi_level_subdomain: false, multi_level_subdomain_levels: 3 },
   };
 }
@@ -31,7 +30,6 @@ const providerDescriptions: Record<string, string> = {
   cloudflare_temp_email: "配置 Cloudflare 域名邮箱 API、管理密码和可用域名。",
   ddg_mail: "配置 DuckDuckGo 别名生成与固定收件箱读取参数。",
   duckmail: "配置 DuckMail API Key 与默认域名。",
-  yyds_mail: "统一配置 YYDS Mail API，ChatGPT 与 Grok 注册均从这里取邮箱。",
   openai_cpa: "配置 OpenAI-CPA 内存邮箱域名池和 Webhook。",
 };
 
@@ -65,7 +63,6 @@ export function MailboxPoolCard() {
   const patchGmail = (updates: Partial<MailProviderConfigs["gmail_oauth"]>) => setConfigs((current) => ({ ...current, gmail_oauth: { ...current.gmail_oauth, ...updates } }));
   const patchDdg = (updates: Partial<MailProviderConfigs["ddg_mail"]>) => setConfigs((current) => ({ ...current, ddg_mail: { ...current.ddg_mail, ...updates } }));
   const patchDuckmail = (updates: Partial<MailProviderConfigs["duckmail"]>) => setConfigs((current) => ({ ...current, duckmail: { ...current.duckmail, ...updates } }));
-  const patchYyds = (updates: Partial<MailProviderConfigs["yyds_mail"]>) => setConfigs((current) => ({ ...current, yyds_mail: { ...current.yyds_mail, ...updates } }));
   const patchOpenaiCpa = (updates: Partial<MailProviderConfigs["openai_cpa"]>) => setConfigs((current) => ({ ...current, openai_cpa: { ...current.openai_cpa, ...updates } }));
   const selectRegistrationSource = (value: MailProviderConfigs["registration_source"]) => {
     setConfigs((current) => {
@@ -74,7 +71,6 @@ export function MailboxPoolCard() {
       if (value === "cloudflare_temp_email") next.cloudflare_temp_email = { ...current.cloudflare_temp_email, enable: true };
       if (value === "ddg_mail") next.ddg_mail = { ...current.ddg_mail, enable: true };
       if (value === "duckmail") next.duckmail = { ...current.duckmail, enable: true };
-      if (value === "yyds_mail") next.yyds_mail = { ...current.yyds_mail, enable: true };
       if (value === "openai_cpa") next.openai_cpa = { ...current.openai_cpa, enable: true };
       return next;
     });
@@ -120,7 +116,6 @@ export function MailboxPoolCard() {
             <option value="cloudflare_temp_email">Cloudflare 域名邮箱模式</option>
             <option value="ddg_mail">DuckGo 转发邮箱模式</option>
             <option value="duckmail">DuckMail 模式</option>
-            <option value="yyds_mail">YYDS Mail 模式</option>
             <option value="openai_cpa">OpenAI-CPA 内存池模式</option>
           </select>
         </div>
@@ -132,7 +127,6 @@ export function MailboxPoolCard() {
               ["cloudflare_temp_email", "Cloudflare 域名邮箱"],
               ["ddg_mail", "DuckGo 转发邮箱"],
               ["duckmail", "DuckMail 鸭子邮箱"],
-              ["yyds_mail", "YYDS Mail"],
               ["openai_cpa", "OpenAI-CPA 内存池"],
             ].map(([key, label]) => (
               <button key={key} type="button" onClick={() => setProviderMode(key)} className={`w-full border px-3 py-3 text-left text-sm transition ${providerMode === key ? "border-emerald-300 bg-emerald-50 text-emerald-950" : "border-slate-200 bg-white text-slate-700 hover:bg-slate-50"}`}>
@@ -210,20 +204,6 @@ export function MailboxPoolCard() {
                   <label className="space-y-1.5 text-xs font-medium text-slate-600">API Key<Input value={configs.duckmail.api_key || ""} onChange={(event) => patchDuckmail({ api_key: event.target.value })} placeholder={configs.duckmail.has_api_key ? configs.duckmail.api_key_preview : "API Key"} type="password" className="h-10" /></label>
                   <label className="space-y-1.5 text-xs font-medium text-slate-600">默认域名<Input value={configs.duckmail.default_domain || "duckmail.sbs"} onChange={(event) => patchDuckmail({ default_domain: event.target.value })} className="h-10" /></label>
                 </div>
-              </div>
-            ) : null}
-
-            {!loading && providerMode === "yyds_mail" ? (
-              <div className="space-y-4">
-                <div className="border border-emerald-200 bg-emerald-50 p-3 text-sm leading-6 text-emerald-900">此处是统一邮箱来源配置。选择 YYDS 后，ChatGPT 与 Grok 注册都会从该配置创建邮箱，不在 Grok 模式中重复维护。</div>
-                <label className="flex items-center gap-2 text-sm font-semibold text-slate-900"><Checkbox checked={configs.yyds_mail.enable} onCheckedChange={(checked) => patchYyds({ enable: Boolean(checked) })} />启用 YYDS Mail</label>
-                <div className="grid gap-3 md:grid-cols-2">
-                  <label className="space-y-1.5 text-xs font-medium text-slate-600">API Base<Input value={configs.yyds_mail.api_base || "https://maliapi.215.im/v1"} onChange={(event) => patchYyds({ api_base: event.target.value })} placeholder="https://maliapi.215.im/v1" className="h-10" /></label>
-                  <label className="space-y-1.5 text-xs font-medium text-slate-600">API Key<Input value={configs.yyds_mail.api_key || ""} onChange={(event) => patchYyds({ api_key: event.target.value })} placeholder={configs.yyds_mail.has_api_key ? configs.yyds_mail.api_key_preview : "YYDS API Key"} type="password" className="h-10" /></label>
-                  <label className="space-y-1.5 text-xs font-medium text-slate-600">域名池<Input value={configs.yyds_mail.domain || ""} onChange={(event) => patchYyds({ domain: event.target.value })} placeholder="example.com,example.net" className="h-10" /></label>
-                  <label className="space-y-1.5 text-xs font-medium text-slate-600">子域名（可选）<Input value={configs.yyds_mail.subdomain || ""} onChange={(event) => patchYyds({ subdomain: event.target.value })} placeholder="留空使用根域名" className="h-10" /></label>
-                </div>
-                <label className="flex items-center gap-2 text-sm text-slate-700"><Checkbox checked={Boolean(configs.yyds_mail.wildcard)} onCheckedChange={(checked) => patchYyds({ wildcard: Boolean(checked) })} />使用通配邮箱接口</label>
               </div>
             ) : null}
 

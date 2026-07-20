@@ -1,3 +1,0 @@
-# Optional dependency for local Headless Playwright fingerprint/DataDome/MTR modes.
-# After installing this file, run: python -m playwright install chromium
-playwright

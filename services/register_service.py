@@ -9,40 +9,15 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import datetime, timezone
 from pathlib import Path
 
-from services import cpa_store, grok2api_store, mailbox_pool_store, partial_account_store, proxy_controller, proxy_pool_store, registered_account_store, shipping_account_store, sub2api_store
+from services import mailbox_pool_store, partial_account_store, proxy_controller, proxy_pool_store, registered_account_store
 from services.atomic_json_store import read_json, write_json
-from services.grok import grok_solver_manager, register_grok_account
 from services.managed_mihomo_service import managed_mihomo_manager
 from services.config import DATA_DIR
 from services.register import mail_provider, openai_register
-from services.registered_account_store import add_registered_account, list_registered_accounts
-from services.sqlite_store import document_signature
+from services.registered_account_store import list_registered_accounts
 from services.proxy_service import normalize_proxy_url
 
 REGISTER_FILE = DATA_DIR / "register.json"
-
-FAILURE_REASON_LABELS = {
-    "turnstile_timeout": "Turnstile 验证超时",
-    "turnstile_unsolvable": "Turnstile 无法解出",
-    "solver_error": "打码服务异常",
-    "signup_page_error": "xAI 注册页解析失败",
-    "email_timeout": "邮箱验证码超时",
-    "email_error": "邮箱服务异常",
-    "email_verification_rejected": "邮箱验证码被拒绝",
-    "proxy_network_error": "代理或网络连接失败",
-    "region_blocked": "地区限制",
-    "cloudflare_blocked": "Cloudflare 拦截",
-    "rate_limited": "请求频率限制",
-    "auth_flow_blocked": "认证流程受阻",
-    "account_exists": "账号已存在",
-    "account_creation_rejected": "账号创建被拒绝",
-    "sso_error": "SSO 获取失败",
-    "oauth_error": "OAuth 交换失败",
-    "local_storage_error": "本地数据写入失败",
-    "cancelled": "任务已停止",
-    "internal_error": "任务执行异常",
-    "other": "其他失败",
-}
 
 
 def _now() -> str:
@@ -56,23 +31,6 @@ def _default_config() -> dict:
         "register_mode": "free",
         "product_mode": "partial",
         "mailbox_group": "",
-        "grok": {
-            "captcha_provider": "local",
-            "local_solver_url": "http://127.0.0.1:5072",
-            "solver_auto_start": True,
-            "solver_threads": 1,
-            "yescaptcha_key": "",
-            "yescaptcha_endpoint": "",
-            "captcha_timeout": 120,
-            "email_timeout": 120,
-            "request_timeout": 30,
-            "oauth_timeout": 45,
-            "exchange_oauth": True,
-            "delivery_target": "warehouses",
-            "auto_import_sub2api": False,
-            "auto_import_cpa": False,
-            "auto_import_grok2api": False,
-        },
         "target_quota": 100,
         "target_available": 10,
         "check_interval": 5,
@@ -90,9 +48,7 @@ def _default_config() -> dict:
             "current_available": 0,
             "registered_total": 0,
             "partial_total": 0,
-            "shipping_total": 0,
             "stored_total": 0,
-            "failure_reasons": {},
         },
     }
 
@@ -140,177 +96,6 @@ def _is_proxy_transport_error(value: object) -> bool:
     )
 
 
-def _is_xai_risk_error(value: object) -> bool:
-    text = str(value or "").lower()
-    return "xai" in text and any(
-        marker in text
-        for marker in (
-            "http 403",
-            "http 429",
-            "status 403",
-            "status 429",
-            "rate limit",
-            "blocked by cloudflare challenge",
-        )
-    )
-
-
-def _classify_failure_reason(value: object) -> tuple[str, str]:
-    text = " ".join(str(value or "").split())
-    lowered = text.lower()
-
-    if "registration cancelled" in lowered or "任务已停止" in text:
-        code = "cancelled"
-    elif any(
-        marker in lowered
-        for marker in (
-            "winerror 5",
-            "permission denied",
-            "access is denied",
-            "拒绝访问",
-            "read-only file system",
-        )
-    ):
-        code = "local_storage_error"
-    elif ("turnstile" in lowered or "yescaptcha" in lowered) and (
-        "did not complete within" in lowered
-        or "timed out" in lowered
-        or "timeout" in lowered
-    ):
-        code = "turnstile_timeout"
-    elif any(
-        marker in lowered
-        for marker in (
-            "error_captcha_unsolvable",
-            "workers could not solve",
-            "captcha_fail",
-            "solver 返回空 token",
-        )
-    ):
-        code = "turnstile_unsolvable"
-    elif any(
-        marker in lowered
-        for marker in (
-            "error_task_not_supported",
-            "unsupported task type",
-            "solver startup timeout",
-            "solver 未就绪",
-            "solver 不可用",
-            "solver 状态异常",
-            "solver process exited",
-            "failed to initialize browser",
-            "failed to acquire browser",
-            "error_no_slot_available",
-            "solver is busy",
-        )
-    ):
-        code = "solver_error"
-    elif any(
-        marker in lowered
-        for marker in (
-            "failed to extract next-action",
-            "next-router-state-tree",
-            "server action id",
-            "deployment may have changed",
-            "max_workers must be greater than 0",
-            "未能从 xai 注册页提取",
-        )
-    ):
-        code = "signup_page_error"
-    elif (
-        "email" in lowered
-        and ("verification" in lowered or "验证码" in text)
-        and ("timed out" in lowered or "timeout" in lowered or "超时" in text)
-    ):
-        code = "email_timeout"
-    elif "email verification rejected" in lowered or "验证码被拒绝" in text:
-        code = "email_verification_rejected"
-    elif any(
-        marker in lowered
-        for marker in (
-            "邮箱提供商",
-            "邮箱来源",
-            "没有可用于注册的邮箱",
-            "mailbox",
-            "yyds create failed",
-            "domain is not ready to receive mail",
-            "api key lacks write permission",
-        )
-    ):
-        code = "email_error"
-    elif _is_region_blocked_error(text):
-        code = "region_blocked"
-    elif _is_cloudflare_blocked_error(text):
-        code = "cloudflare_blocked"
-    elif _is_proxy_transport_error(text) or any(
-        marker in lowered
-        for marker in (
-            "could not connect to server",
-            "could not connect to serv",
-            "failed to connect to",
-            "connection refused",
-            "connection reset",
-            "proxy connect",
-            "proxyerror",
-            "connect timeout",
-            "network is unreachable",
-        )
-    ):
-        code = "proxy_network_error"
-    elif "429" in lowered or "rate limit" in lowered or "频率限制" in text:
-        code = "rate_limited"
-    elif _is_auth_flow_blocked_error(text):
-        code = "auth_flow_blocked"
-    elif any(marker in lowered for marker in ("user_already_exists", "already exists", "existing account")):
-        code = "account_exists"
-    elif any(
-        marker in lowered
-        for marker in (
-            "account_creation_failed",
-            "create_account failed",
-            "create_account rejected",
-            "account_signup_error",
-            "registration_disallowed",
-        )
-    ):
-        code = "account_creation_rejected"
-    elif "sso" in lowered and any(marker in lowered for marker in ("failed", "missing", "没有取得", "为空")):
-        code = "sso_error"
-    elif "oauth" in lowered and any(marker in lowered for marker in ("failed", "error", "timeout", "missing")):
-        code = "oauth_error"
-    elif "403" in lowered:
-        code = "rate_limited"
-    elif "任务执行异常" in text:
-        code = "internal_error"
-    else:
-        code = "other"
-    return code, FAILURE_REASON_LABELS[code]
-
-
-def _normalize_failure_reasons(value: object) -> dict:
-    if not isinstance(value, dict):
-        return {}
-    normalized: dict[str, dict] = {}
-    for raw_code, raw_item in value.items():
-        code = str(raw_code or "").strip()
-        if not code or not isinstance(raw_item, dict):
-            continue
-        try:
-            count = max(0, int(raw_item.get("count") or 0))
-        except (TypeError, ValueError):
-            count = 0
-        if count <= 0:
-            continue
-        normalized[code] = {
-            "code": code,
-            "label": str(raw_item.get("label") or FAILURE_REASON_LABELS.get(code) or code)[:80],
-            "count": count,
-            "last_error": " ".join(str(raw_item.get("last_error") or "").split())[:320],
-            "last_at": str(raw_item.get("last_at") or "")[:64],
-        }
-    return normalized
-
-
 def _safe_bool(value: object, fallback: bool) -> bool:
     if isinstance(value, bool):
         return value
@@ -337,7 +122,7 @@ def _normalize(raw: dict) -> dict:
         register_mode = "free"
     if legacy_free_crash:
         register_mode = "free"
-    cfg["register_mode"] = register_mode if register_mode in {"free", "k12", "grok"} else "free"
+    cfg["register_mode"] = register_mode if register_mode in {"free", "k12"} else "free"
     product_mode = str(cfg.get("product_mode") or "partial").strip().lower()
     cfg["product_mode"] = product_mode if product_mode in {"partial", "finished"} else "partial"
     if legacy_free_crash:
@@ -349,10 +134,6 @@ def _normalize(raw: dict) -> dict:
     cfg["k12_mode"] = cfg["register_mode"] == "k12" or _safe_bool(cfg.get("k12_mode"), False)
     if cfg["register_mode"] == "free":
         cfg["k12_mode"] = False
-    if cfg["register_mode"] == "grok":
-        cfg["k12_mode"] = False
-        cfg["product_mode"] = "finished"
-        cfg["mode"] = "total"
     cfg["target_quota"] = max(1, int(cfg.get("target_quota") or 1))
     cfg["target_available"] = max(1, int(cfg.get("target_available") or 1))
     cfg["check_interval"] = max(1, int(cfg.get("check_interval") or 5))
@@ -362,36 +143,12 @@ def _normalize(raw: dict) -> dict:
     cfg["mail"] = {**default_mail, **mail}
     cfg["mail"]["api_use_register_proxy"] = _safe_bool(cfg["mail"].get("api_use_register_proxy"), True)
     cfg["mail"].pop("proxy", None)
-    default_grok = _default_config()["grok"]
-    grok = raw.get("grok") if isinstance(raw.get("grok"), dict) else cfg.get("grok")
-    grok = grok if isinstance(grok, dict) else {}
-    cfg["grok"] = {**default_grok, **grok}
-    cfg["grok"]["captcha_provider"] = str(cfg["grok"].get("captcha_provider") or "local").strip().lower()
-    if cfg["grok"]["captcha_provider"] not in {"local", "yescaptcha"}:
-        cfg["grok"]["captcha_provider"] = "local"
-    cfg["grok"]["local_solver_url"] = str(cfg["grok"].get("local_solver_url") or default_grok["local_solver_url"]).strip().rstrip("/")
-    cfg["grok"]["solver_auto_start"] = _safe_bool(cfg["grok"].get("solver_auto_start"), True)
-    cfg["grok"]["solver_threads"] = max(1, min(4, int(cfg["grok"].get("solver_threads") or 1)))
-    cfg["grok"]["exchange_oauth"] = _safe_bool(cfg["grok"].get("exchange_oauth"), True)
-    delivery_target = str(cfg["grok"].get("delivery_target") or "warehouses").strip().lower()
-    cfg["grok"]["delivery_target"] = delivery_target if delivery_target in {"warehouses", "shipping"} else "warehouses"
-    cfg["grok"]["auto_import_sub2api"] = _safe_bool(cfg["grok"].get("auto_import_sub2api"), False)
-    cfg["grok"]["auto_import_cpa"] = _safe_bool(cfg["grok"].get("auto_import_cpa"), False)
-    cfg["grok"]["auto_import_grok2api"] = _safe_bool(cfg["grok"].get("auto_import_grok2api"), False)
-    for key, fallback, lower, upper in (
-        ("captcha_timeout", 120, 30, 300),
-        ("email_timeout", 120, 30, 300),
-        ("request_timeout", 30, 10, 120),
-        ("oauth_timeout", 45, 15, 180),
-    ):
-        cfg["grok"][key] = max(lower, min(upper, int(cfg["grok"].get(key) or fallback)))
     cfg["enabled"] = bool(cfg.get("enabled"))
     cfg["stats"] = {
         **_default_config()["stats"],
         **(raw.get("stats") if isinstance(raw.get("stats"), dict) else {}),
         "threads": cfg["threads"],
     }
-    cfg["stats"]["failure_reasons"] = _normalize_failure_reasons(cfg["stats"].get("failure_reasons"))
     return cfg
 
 
@@ -405,10 +162,6 @@ class RegisterService:
         self._last_hot_reload: dict = {}
         self._pool_metrics_signature: tuple | None = None
         self._pool_metrics_cache: dict = {}
-        self._solver_status_lock = threading.Lock()
-        self._solver_status_cache: dict = {}
-        self._solver_status_url = ""
-        self._solver_status_cached_at = 0.0
         openai_register.register_log_sink = self._append_log
         self._config = self._load()
         try:
@@ -509,26 +262,11 @@ class RegisterService:
             raise RuntimeError(f"微软邮箱分组{label}没有可用于注册的邮箱，请在“邮箱”中导入邮箱或切换分组")
         raise RuntimeError(f"邮箱来源 {source or 'unknown'} 配置不完整，请先在“邮箱配置”中补齐凭据")
 
-    def _cached_solver_status(self, url: str, *, max_age_seconds: float = 5.0) -> dict:
-        normalized_url = str(url or "").strip().rstrip("/")
-        with self._solver_status_lock:
-            if (
-                normalized_url == self._solver_status_url
-                and self._solver_status_cache
-                and time.monotonic() - self._solver_status_cached_at < max(0.5, float(max_age_seconds))
-            ):
-                return deepcopy(self._solver_status_cache)
-            status = grok_solver_manager.status(normalized_url)
-            self._solver_status_cache = dict(status)
-            self._solver_status_url = normalized_url
-            self._solver_status_cached_at = time.monotonic()
-            return deepcopy(status)
-
     def get(self) -> dict:
         pool_metrics = self._pool_metrics()
         with self._lock:
             stats = self._config.get("stats") if isinstance(self._config.get("stats"), dict) else {}
-            stats.update({key: value for key, value in pool_metrics.items() if key in {"registered_total", "partial_total", "shipping_total", "stored_total"}})
+            stats.update({key: value for key, value in pool_metrics.items() if key in {"registered_total", "partial_total", "stored_total"}})
             self._config["stats"] = stats
             snapshot = json.loads(json.dumps({
                 **self._config,
@@ -540,12 +278,6 @@ class RegisterService:
                 },
             }, ensure_ascii=False))
         self._redact_outlook_pools(snapshot)
-        grok = snapshot.get("grok")
-        if isinstance(grok, dict) and grok.get("yescaptcha_key"):
-            grok["has_yescaptcha_key"] = True
-            grok["yescaptcha_key"] = "***"
-        if isinstance(grok, dict):
-            grok["solver_status"] = self._cached_solver_status(str(grok.get("local_solver_url") or ""))
         return snapshot
 
     @staticmethod
@@ -610,13 +342,6 @@ class RegisterService:
 
     def update(self, updates: dict) -> dict:
         with self._lock:
-            updates = deepcopy(updates or {})
-            if isinstance(updates.get("grok"), dict):
-                current_grok = self._config.get("grok") if isinstance(self._config.get("grok"), dict) else {}
-                incoming_grok = dict(updates["grok"])
-                if str(incoming_grok.get("yescaptcha_key") or "").strip() in {"", "***"}:
-                    incoming_grok["yescaptcha_key"] = str(current_grok.get("yescaptcha_key") or "")
-                updates["grok"] = {**current_grok, **incoming_grok}
             self._import_outlook_text_from_updates(updates)
             self._config = _normalize({**self._config, **updates})
             self._push_runtime_config()
@@ -632,11 +357,6 @@ class RegisterService:
                 return self.get()
             self._push_runtime_config()
             self._validate_runtime_mail_config()
-            if self._config.get("register_mode") == "grok":
-                grok_config = self._config.get("grok") if isinstance(self._config.get("grok"), dict) else {}
-                if str(grok_config.get("captcha_provider") or "local") == "local":
-                    solver = grok_solver_manager.ensure_started(grok_config)
-                    self._append_log(f"本地 Turnstile Solver 已就绪：{solver.get('url')}", "green")
             self._config["enabled"] = True
             self._logs = []
             metrics = self._pool_metrics()
@@ -650,19 +370,13 @@ class RegisterService:
                 **metrics,
                 "current_quota": 0,
                 "current_available": 0,
-                "failure_reasons": {},
                 "started_at": _now(),
                 "updated_at": _now(),
             }
-            self._config["registration_batch_id"] = (
-                f"register-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-"
-                f"{self._config['stats']['job_id'][:8]}"
-            )
-            self._config["registration_batch_label"] = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M 注册批次")
             with openai_register.stats_lock:
                 openai_register.stats.update({"done": 0, "success": 0, "fail": 0, "start_time": time.time()})
             self._save()
-            self._runner = threading.Thread(target=self._run, daemon=True, name="moyu-register")
+            self._runner = threading.Thread(target=self._run, daemon=True, name="openai-register")
             self._runner.start()
             group_label = self._config.get("mailbox_group") or "全部"
             target_mode = str(self._config.get("mode") or "total")
@@ -678,12 +392,6 @@ class RegisterService:
             self._append_log("已请求停止注册任务，等待当前线程结束", "yellow")
             return self.get()
 
-    def clear_logs(self) -> dict:
-        with self._lock:
-            self._logs = []
-            self._save()
-            return self.get()
-
     def reset(self) -> dict:
         with self._lock:
             self._logs = []
@@ -696,7 +404,6 @@ class RegisterService:
                 "elapsed_seconds": 0,
                 "avg_seconds": 0,
                 "success_rate": 0,
-                "failure_reasons": {},
                 **self._pool_metrics(),
                 "updated_at": _now(),
             }
@@ -732,10 +439,14 @@ class RegisterService:
 
     @staticmethod
     def _inventory_signature() -> tuple:
-        return tuple(
-            document_signature(path)
-            for path in (registered_account_store.REGISTERED_ACCOUNTS_FILE, partial_account_store.PARTIAL_ACCOUNTS_FILE, shipping_account_store.SHIPPING_ACCOUNTS_FILE)
-        )
+        signature: list[tuple[str, int, int]] = []
+        for path in (registered_account_store.REGISTERED_ACCOUNTS_FILE, partial_account_store.PARTIAL_ACCOUNTS_FILE):
+            try:
+                stat = path.stat()
+                signature.append((str(path), int(stat.st_mtime_ns), int(stat.st_size)))
+            except OSError:
+                signature.append((str(path), 0, 0))
+        return tuple(signature)
 
     def _pool_metrics(self) -> dict:
         signature = self._inventory_signature()
@@ -744,7 +455,6 @@ class RegisterService:
                 return dict(self._pool_metrics_cache)
         registered = list_registered_accounts(include_secret=False)
         partial = partial_account_store.list_partial_accounts(include_secret=False)
-        shipping = shipping_account_store.list_accounts(include_secret=False)
         available = 0
         quota = 0.0
         for account in registered:
@@ -763,8 +473,7 @@ class RegisterService:
             "current_available": available,
             "registered_total": len(registered),
             "partial_total": len(partial),
-            "shipping_total": len(shipping),
-            "stored_total": len(registered) + len(partial) + len(shipping),
+            "stored_total": len(registered) + len(partial),
         }
         with self._lock:
             self._pool_metrics_signature = signature
@@ -794,79 +503,6 @@ class RegisterService:
         return False
 
     def _run_registration_task(self, task_index: int, proxy: str, assignment: dict, target_mode: str, task_config: dict) -> dict:
-        if str(task_config.get("register_mode") or "free").strip().lower() == "grok":
-            grok_config = task_config.get("grok") if isinstance(task_config.get("grok"), dict) else {}
-            result = register_grok_account(
-                task_index,
-                proxy=proxy,
-                mail_config=task_config.get("mail") if isinstance(task_config.get("mail"), dict) else {},
-                grok_config=grok_config,
-                progress=self._append_log,
-                should_cancel=lambda: not self._is_enabled(),
-            )
-            result["proxy_assignment"] = assignment
-            account = result.get("result") if isinstance(result.get("result"), dict) else None
-            if result.get("ok") and account:
-                batch_updates = {
-                    "registration_batch_id": str(task_config.get("registration_batch_id") or ""),
-                    "registration_batch_label": str(task_config.get("registration_batch_label") or ""),
-                }
-                account.update({key: value for key, value in batch_updates.items() if value})
-                registration_proxy = proxy_pool_store.registration_proxy_record(assignment, proxy=proxy)
-                if registration_proxy:
-                    account.update(
-                        {
-                            "registration_proxy": registration_proxy,
-                            "registration_proxy_source": str(registration_proxy.get("source") or ""),
-                            "registration_proxy_node_id": str(registration_proxy.get("node_id") or ""),
-                            "registration_proxy_label": str(registration_proxy.get("label") or registration_proxy.get("node_name") or ""),
-                        }
-                    )
-                delivery_target = str(grok_config.get("delivery_target") or "warehouses").strip().lower()
-                if delivery_target == "shipping":
-                    stored = shipping_account_store.add_account(account)
-                    result["storage"] = "shipping"
-                    result["warehouse"] = {"shipping": {"ok": True}}
-                    self._append_log(f"[Grok任务{task_index}] 已保存到出货账号库存", "green")
-                    if shipping_account_store.get_config().get("enabled"):
-                        try:
-                            store_result = shipping_account_store.publish_to_store(
-                                selectors=[str(stored.get("shipping_id") or "")],
-                                allow_unverified=True,
-                            )
-                            result["warehouse"]["store"] = store_result
-                            self._append_log(f"[Grok任务{task_index}] 已自动同步到商店账号库存", "green")
-                        except Exception as error:
-                            result["warehouse"]["store"] = {"ok": False, "error": str(error)}
-                            self._append_log(f"[Grok任务{task_index}] 商店库存同步失败，账号已保留在本地：{error}", "yellow")
-                    return result
-                add_registered_account(account)
-                warehouse: dict[str, Any] = {}
-                if bool(grok_config.get("auto_import_sub2api")):
-                    try:
-                        warehouse["sub2api"] = sub2api_store.import_account_dicts_to_sub2api(account)
-                        self._append_log(f"[Grok任务{task_index}] 已提交到 sub2api", "green")
-                    except Exception as error:
-                        warehouse["sub2api"] = {"ok": False, "error": str(error)}
-                        self._append_log(f"[Grok任务{task_index}] sub2api 导入失败：{error}", "yellow")
-                if bool(grok_config.get("auto_import_cpa")):
-                    try:
-                        warehouse["cpa"] = cpa_store.import_account_dicts_to_cpa(account)
-                        self._append_log(f"[Grok任务{task_index}] 已提交到 CPA", "green")
-                    except Exception as error:
-                        warehouse["cpa"] = {"ok": False, "error": str(error)}
-                        self._append_log(f"[Grok任务{task_index}] CPA 导入失败：{error}", "yellow")
-                if bool(grok_config.get("auto_import_grok2api")):
-                    try:
-                        warehouse["grok2api"] = grok2api_store.import_account_dicts_to_grok2api(account)
-                        if not warehouse["grok2api"].get("ok"):
-                            raise RuntimeError(str(warehouse["grok2api"].get("error") or "grok2api 未确认导入成功"))
-                        self._append_log(f"[Grok任务{task_index}] SSO 已提交到 grok2api", "green")
-                    except Exception as error:
-                        warehouse["grok2api"] = {"ok": False, "error": str(error)}
-                        self._append_log(f"[Grok任务{task_index}] grok2api SSO 导入失败：{error}", "yellow")
-                result["warehouse"] = warehouse
-            return result
         result = openai_register.worker(task_index, proxy, assignment, runtime_config=task_config)
         if not result.get("ok") or target_mode not in {"available", "quota"}:
             return result
@@ -904,23 +540,6 @@ class RegisterService:
                 stats["success_rate"] = round(success * 100 / max(1, success + fail), 1)
             self._config["stats"]["updated_at"] = _now()
             self._save()
-
-    def _record_failure(self, result: dict) -> None:
-        error = result.get("error") or result.get("reason") or result.get("message") or ""
-        code, label = _classify_failure_reason(error)
-        error_summary = " ".join(str(error or label).split())[:320]
-        with self._lock:
-            stats = self._config.setdefault("stats", {})
-            reasons = stats.setdefault("failure_reasons", {})
-            current = reasons.get(code) if isinstance(reasons.get(code), dict) else {}
-            reasons[code] = {
-                "code": code,
-                "label": label,
-                "count": int(current.get("count") or 0) + 1,
-                "last_error": error_summary,
-                "last_at": _now(),
-            }
-        result["failure_reason"] = code
 
     def _rotate_proxy_for_error(self, reason: object) -> bool:
         try:
@@ -992,7 +611,7 @@ class RegisterService:
                         task_config,
                     )
                     futures[future] = slot
-                self._bump(running=len(futures), done=done, success=success, fail=fail, current_available=current_available, current_quota=round(current_quota, 2), **{key: value for key, value in self._pool_metrics().items() if key in {"registered_total", "partial_total", "shipping_total", "stored_total"}})
+                self._bump(running=len(futures), done=done, success=success, fail=fail, current_available=current_available, current_quota=round(current_quota, 2), **{key: value for key, value in self._pool_metrics().items() if key in {"registered_total", "partial_total", "stored_total"}})
                 if not futures and (not self._is_enabled() or self._target_reached(cfg, submitted, current_available, current_quota)):
                     break
                 if not futures:
@@ -1020,7 +639,6 @@ class RegisterService:
                                     self._append_log(f"任务 {result.get('index')} 注册成功但未读取到可累计额度，不计入额度目标", "yellow")
                         else:
                             fail += 1
-                            self._record_failure(result)
                             if _is_region_blocked_error(result.get("error")):
                                 if self._quarantine_managed_proxy(result, result.get("error")):
                                     pass
@@ -1039,22 +657,14 @@ class RegisterService:
                                         self._config["enabled"] = False
                                         self._save()
                                     self._append_log("OpenAI/Auth0 被 Cloudflare 拦截，已自动停止本批任务；请更换代理或配置 clearance 后再释放 CF/失败邮箱重试。", "yellow")
-                            elif _is_xai_risk_error(result.get("error")):
-                                if self._quarantine_managed_proxy(result, result.get("error")):
-                                    pass
-                                elif not self._rotate_proxy_for_error(result.get("error")):
-                                    self._append_log("xAI 返回 403/429 风控，当前代理无法自动切换；请更换节点后重试。", "yellow")
                             elif _is_proxy_transport_error(result.get("error")):
                                 if self._quarantine_managed_proxy(result, result.get("error")):
                                     pass
                                 elif not self._rotate_proxy_for_error(result.get("error")):
                                     self._append_log("代理/TLS 连接失败，代理控制器未能切换；请检查本地代理或节点可用性。", "yellow")
-                    except Exception as error:
+                    except Exception:
                         fail += 1
-                        result = {"ok": False, "error": f"任务执行异常：{error}"}
-                        self._record_failure(result)
-                        self._append_log(result["error"], "red")
-        self._bump(running=0, done=done, success=success, fail=fail, current_available=current_available, current_quota=round(current_quota, 2), finished_at=_now(), **{key: value for key, value in self._pool_metrics().items() if key in {"registered_total", "partial_total", "shipping_total", "stored_total"}})
+        self._bump(running=0, done=done, success=success, fail=fail, current_available=current_available, current_quota=round(current_quota, 2), finished_at=_now(), **{key: value for key, value in self._pool_metrics().items() if key in {"registered_total", "partial_total", "stored_total"}})
         with self._lock:
             self._config["enabled"] = False
             self._save()

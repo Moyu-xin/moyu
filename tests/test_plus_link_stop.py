@@ -38,13 +38,12 @@ class PlusLinkStopTests(unittest.TestCase):
             submitted.append(index)
             started.set()
             release.wait(5)
-            completed = self.service._set_task_result(task_id, {"status": "success", "stage": "完成"})
-            if completed:
-                with self.service._lock:
-                    stats = self.service._state["stats"]
-                    stats["success"] += 1
-                    stats["done"] += 1
-                    stats["running"] -= 1
+            self.service._set_task_result(task_id, {"status": "success", "stage": "完成"})
+            with self.service._lock:
+                stats = self.service._state["stats"]
+                stats["success"] += 1
+                stats["done"] += 1
+                stats["running"] -= 1
 
         with (
             patch.object(plus_link_store, "_load_plus_engine", return_value=object()),
@@ -60,9 +59,9 @@ class PlusLinkStopTests(unittest.TestCase):
         self.assertFalse(runner.is_alive())
         self.assertEqual(submitted, [1])
         results = self.service._state["results"]
-        self.assertEqual(sum(item["status"] == "success" for item in results), 0)
-        self.assertEqual(sum(item["status"] == "cancelled" for item in results), 5)
-        self.assertEqual(self.service._state["stats"]["cancelled"], 5)
+        self.assertEqual(sum(item["status"] == "success" for item in results), 1)
+        self.assertEqual(sum(item["status"] == "cancelled" for item in results), 4)
+        self.assertEqual(self.service._state["stats"]["cancelled"], 4)
         self.assertEqual(self.service._state["stats"]["done"], 5)
         self.assertEqual(self.service._state["stats"]["running"], 0)
 

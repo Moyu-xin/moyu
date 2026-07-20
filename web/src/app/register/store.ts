@@ -4,14 +4,12 @@ import { create } from "zustand";
 import { toast } from "sonner";
 
 import {
-  clearRegisterLogs as clearRegisterLogsApi,
   fetchRegisterConfig,
   resetOutlookTokenPool,
   resetRegister as resetRegisterApi,
   startRegister,
   stopRegister,
   updateRegisterConfig,
-  type GrokRegisterConfig,
   type RegisterConfig,
 } from "@/lib/api";
 
@@ -24,15 +22,13 @@ type RegisterStore = {
   setRegisterTotal: (value: string) => void;
   setRegisterThreads: (value: string) => void;
   setRegisterMode: (value: "total" | "quota" | "available") => void;
-  setRegisterFlowMode: (value: "free" | "k12" | "grok") => void;
+  setRegisterFlowMode: (value: "free" | "k12") => void;
   setRegisterProductMode: (value: "partial" | "finished") => void;
-  setGrokConfig: (updates: Partial<GrokRegisterConfig>) => void;
   setRegisterTargetQuota: (value: string) => void;
   setRegisterTargetAvailable: (value: string) => void;
   setRegisterCheckInterval: (value: string) => void;
   saveRegister: () => Promise<void>;
   toggleRegister: () => Promise<void>;
-  clearRegisterLogs: () => Promise<void>;
   resetRegister: () => Promise<void>;
   resetOutlookPool: (scope?: "all" | "failed" | "unused") => Promise<void>;
 };
@@ -65,7 +61,7 @@ export const useSettingsStore = create<RegisterStore>((set, get) => ({
   setRegisterMode: (value) => set((state) => state.registerConfig ? { registerConfig: patchConfig(state.registerConfig, { mode: value }) } : {}),
   setRegisterFlowMode: (value) => {
     const k12Mode = value === "k12";
-    set((state) => state.registerConfig ? { registerConfig: patchConfig(state.registerConfig, { register_mode: value, k12_mode: k12Mode, ...(value === "grok" ? { mode: "total", product_mode: "finished" } : {}) }) } : {});
+    set((state) => state.registerConfig ? { registerConfig: patchConfig(state.registerConfig, { register_mode: value, k12_mode: k12Mode }) } : {});
     void (async () => {
       const config = get().registerConfig;
       if (!config || config.enabled) return;
@@ -80,25 +76,6 @@ export const useSettingsStore = create<RegisterStore>((set, get) => ({
       }
     })();
   },
-  setGrokConfig: (updates) => set((state) => {
-    if (!state.registerConfig) return {};
-    const current = state.registerConfig.grok || {
-      captcha_provider: "local",
-      local_solver_url: "http://127.0.0.1:5072",
-      solver_auto_start: true,
-      solver_threads: 1,
-      captcha_timeout: 120,
-      email_timeout: 120,
-      request_timeout: 30,
-      oauth_timeout: 45,
-      exchange_oauth: true,
-      delivery_target: "warehouses",
-      auto_import_sub2api: false,
-      auto_import_cpa: false,
-      auto_import_grok2api: false,
-    };
-    return { registerConfig: patchConfig(state.registerConfig, { grok: { ...current, ...updates } }) };
-  }),
   setRegisterProductMode: (value) => {
     set((state) => state.registerConfig ? { registerConfig: patchConfig(state.registerConfig, { product_mode: value }) } : {});
     void (async () => {
@@ -130,7 +107,6 @@ export const useSettingsStore = create<RegisterStore>((set, get) => ({
         target_available: Math.max(1, Number(config.target_available) || 1),
         check_interval: Math.max(1, Number(config.check_interval) || 5),
         k12_mode: Boolean(config.k12_mode),
-        grok: config.grok,
       });
       set({ registerConfig: data.register });
       toast.success("注册配置已保存");
@@ -157,7 +133,6 @@ export const useSettingsStore = create<RegisterStore>((set, get) => ({
           target_available: Math.max(1, Number(config.target_available) || 1),
           check_interval: Math.max(1, Number(config.check_interval) || 5),
           k12_mode: Boolean(config.k12_mode),
-          grok: config.grok,
         });
       }
       const data = config.enabled ? await stopRegister() : await startRegister();
@@ -165,19 +140,6 @@ export const useSettingsStore = create<RegisterStore>((set, get) => ({
       toast.success(config.enabled ? "注册任务已停止" : "注册任务已启动");
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "切换注册状态失败");
-    } finally {
-      set({ isSavingRegister: false });
-    }
-  },
-
-  clearRegisterLogs: async () => {
-    set({ isSavingRegister: true });
-    try {
-      const data = await clearRegisterLogsApi();
-      set({ registerConfig: data.register });
-      toast.success("运行日志已清空");
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "清空运行日志失败");
     } finally {
       set({ isSavingRegister: false });
     }

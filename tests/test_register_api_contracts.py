@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import inspect
 import unittest
 from unittest.mock import patch
 
@@ -32,30 +31,6 @@ class RegisterApiContractTests(unittest.TestCase):
         self.assertIn(("body", "mail"), rejected_fields)
         self.assertIn(("body", "proxy"), rejected_fields)
 
-    def test_blocking_warehouse_and_inventory_routes_use_threadpool_handlers(self) -> None:
-        client = self._client()
-        blocking_paths = {
-            "/api/outlook-mailboxes",
-            "/api/outlook-mailboxes/messages",
-            "/api/accounts",
-            "/api/partial-accounts",
-            "/api/sub2api/groups",
-            "/api/sub2api/accounts",
-            "/api/cpa/accounts",
-            "/api/grok2api/accounts",
-            "/api/proxy-pool/test",
-        }
-        endpoints = {
-            route.path: route.endpoint
-            for route in client.app.routes
-            if getattr(route, "path", "") in blocking_paths
-        }
-
-        self.assertEqual(set(endpoints), blocking_paths)
-        for path, endpoint in endpoints.items():
-            with self.subTest(path=path):
-                self.assertFalse(inspect.iscoroutinefunction(endpoint))
-
     def test_register_start_returns_bad_request_for_invalid_mail_source(self) -> None:
         client = self._client()
         with (
@@ -66,139 +41,6 @@ class RegisterApiContractTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.json()["detail"], "empty mailbox group")
-
-    def test_register_logs_clear_uses_dedicated_service_operation(self) -> None:
-        client = self._client()
-        expected = {"enabled": True, "logs": [], "stats": {"success": 8, "fail": 3}}
-        with (
-            patch.object(register_api, "require_admin"),
-            patch.object(register_api.register_service, "clear_logs", return_value=expected) as clear_logs,
-        ):
-            response = client.post("/api/register/logs/clear")
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["register"], expected)
-        clear_logs.assert_called_once_with()
-
-    def test_account_outbound_selects_quantity_batch_and_marks_export(self) -> None:
-        client = self._client()
-        accounts = [{"email": "a@example.com", "access_token": "token"}]
-        with (
-            patch.object(register_api, "require_admin"),
-            patch.object(register_api, "select_accounts_for_outbound", return_value=accounts) as select,
-            patch.object(register_api.sub2api_store, "export_account_dicts_to_sub2api", return_value={"count": 1, "data": {"accounts": [1]}}),
-            patch.object(register_api, "mark_accounts_outbound", return_value={"marked": 1, "outbound_batch_id": "out-1", "outbound_at": "now"}),
-            patch.object(register_api, "registration_batches", return_value=[]),
-        ):
-            response = client.post("/api/accounts/outbound", json={
-                "quantity": 1,
-                "registration_batch_id": "register-a",
-                "format": "sub2api",
-            })
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["account_outbound"]["count"], 1)
-        select.assert_called_once_with(quantity=1, registration_batch_id="register-a", include_outbound=False)
-
-    def test_mailbox_outbound_returns_credentials_payload(self) -> None:
-        client = self._client()
-        mailboxes = [{
-            "provider_type": "outlook_token",
-            "email": "mail@example.com",
-            "password": "password",
-            "client_id": "client",
-            "refresh_token": "refresh",
-        }]
-        with (
-            patch.object(register_api, "require_admin"),
-            patch.object(register_api.mailbox_pool_store, "select_mailboxes_for_outbound", return_value=mailboxes),
-            patch.object(register_api.mailbox_pool_store, "mark_mailboxes_outbound", return_value={"marked": 1, "outbound_batch_id": "mail-out-1", "outbound_at": "now"}),
-            patch.object(register_api.mailbox_pool_store, "mailbox_batches", return_value=[]),
-        ):
-            response = client.post("/api/mailboxes/outbound", json={"quantity": 1, "format": "credentials"})
-
-        self.assertEqual(response.status_code, 200)
-        self.assertIn("mail@example.com----password----client----refresh", response.json()["mailbox_outbound"]["data"])
-
-    def test_grok_solver_restart_uses_requested_url_and_threads(self) -> None:
-        client = self._client()
-        expected = {"running": True, "reachable": True, "actual_threads": 4}
-        with (
-            patch.object(register_api, "require_admin"),
-            patch.object(register_api.register_service, "is_running", return_value=False),
-            patch.object(register_api.register_service, "get", return_value={"grok": {"solver_threads": 1}}),
-            patch.object(register_api.grok_solver_manager, "restart", return_value=expected) as restart,
-        ):
-            response = client.post(
-                "/api/grok/solver",
-                json={"action": "restart", "url": "http://127.0.0.1:5072", "threads": 4},
-            )
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["grok_solver"], expected)
-        restart.assert_called_once_with("http://127.0.0.1:5072", threads=4)
-
-    def test_grok_solver_stop_targets_configured_endpoint(self) -> None:
-        client = self._client()
-        expected = {"running": False, "reachable": False}
-        with (
-            patch.object(register_api, "require_admin"),
-            patch.object(register_api.register_service, "is_running", return_value=False),
-            patch.object(register_api.register_service, "get", return_value={"grok": {"local_solver_url": "http://127.0.0.1:5073"}}),
-            patch.object(register_api.grok_solver_manager, "stop", return_value=expected) as stop,
-        ):
-            response = client.post("/api/grok/solver", json={"action": "stop"})
-
-        self.assertEqual(response.status_code, 200)
-        stop.assert_called_once_with("http://127.0.0.1:5073")
-
-    def test_grok_solver_cannot_stop_while_registration_runs(self) -> None:
-        client = self._client()
-        with (
-            patch.object(register_api, "require_admin"),
-            patch.object(register_api.register_service, "is_running", return_value=True),
-            patch.object(register_api.grok_solver_manager, "stop") as stop,
-        ):
-            response = client.post("/api/grok/solver", json={"action": "stop"})
-
-        self.assertEqual(response.status_code, 409)
-        self.assertIn("请先停止注册任务", response.json()["detail"])
-        stop.assert_not_called()
-
-    def test_plus_link_retry_returns_bad_request_for_non_retryable_task(self) -> None:
-        client = self._client()
-        with (
-            patch.object(register_api, "require_admin"),
-            patch.object(
-                register_api.plus_link_store.plus_link_service,
-                "retry_task",
-                side_effect=RuntimeError("临时 token 任务不保存凭据，请重新粘贴 token 后启动"),
-            ),
-        ):
-            response = client.post("/api/plus-link/tasks/manual-task/retry")
-
-        self.assertEqual(response.status_code, 400)
-        self.assertEqual(response.json()["detail"], "临时 token 任务不保存凭据，请重新粘贴 token 后启动")
-
-    def test_plus_link_retry_failed_endpoint_returns_bulk_summary(self) -> None:
-        client = self._client()
-        expected = {
-            "results": [],
-            "bulk_retry": {"requested": 3, "restarted": 2, "skipped": 1},
-        }
-        with (
-            patch.object(register_api, "require_admin"),
-            patch.object(
-                register_api.plus_link_store.plus_link_service,
-                "retry_failed_tasks",
-                return_value=expected,
-            ) as retry_failed,
-        ):
-            response = client.post("/api/plus-link/retry-failed")
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["plus_link"], expected)
-        retry_failed.assert_called_once_with()
 
     def test_managed_mihomo_start_honors_requested_threads(self) -> None:
         client = self._client()
@@ -212,36 +54,6 @@ class RegisterApiContractTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         start.assert_called_once_with(2, {})
-
-    def test_plus_link_config_preserves_checkout_protocol_fields(self) -> None:
-        client = self._client()
-        expected = {
-            "residential_parent_proxy_override": "http://127.0.0.1:7897",
-            "checkout_ui_mode": "custom",
-            "provider_country": "BR",
-            "approve_country": "JP",
-            "stripe_provider_egress": "left_residential",
-            "stripe_poll_egress": "promotion",
-            "paypal_confirm_mode": "payment_method",
-            "paypal_confirm_protocol": "standalone",
-            "proxy_quality_gate_enabled": True,
-            "proxy_quality_candidate_limit": 4,
-            "proxy_quality_probe_rounds": 2,
-            "proxy_quality_max_latency_ms": 15000,
-            "proxy_quality_quarantine_seconds": 600,
-        }
-        with (
-            patch.object(register_api, "require_admin"),
-            patch.object(
-                register_api.plus_link_store.plus_link_service,
-                "update_config",
-                return_value={"config": expected},
-            ) as update_config,
-        ):
-            response = client.post("/api/plus-link/config", json=expected)
-
-        self.assertEqual(response.status_code, 200)
-        update_config.assert_called_once_with(expected)
 
     def test_managed_mihomo_stop_is_blocked_while_registration_runs(self) -> None:
         client = self._client()
@@ -321,48 +133,6 @@ class RegisterApiContractTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["sub2api"], result)
-
-    def test_sub2api_import_forwards_grok_reauthorization(self) -> None:
-        client = self._client()
-        result = {"ok": True, "total": 1, "success": 1, "fail": 0}
-        with (
-            patch.object(register_api, "require_admin"),
-            patch.object(register_api.sub2api_store, "import_accounts_to_sub2api", return_value=result) as import_accounts,
-            patch.object(register_api, "account_pool", return_value={"accounts": []}),
-        ):
-            response = client.post(
-                "/api/accounts/import-sub2api",
-                json={"emails": ["grok:expired@example.com"], "reauthorize_grok": True},
-            )
-
-        self.assertEqual(response.status_code, 200)
-        import_accounts.assert_called_once_with(["grok:expired@example.com"], reauthorize_grok=True)
-
-    def test_grok_refresh_token_uses_sso_reauthorization(self) -> None:
-        client = self._client()
-        account = {
-            "platform": "grok",
-            "email": "expired@example.com",
-            "sso_token": "sso-token",
-            "sub2api_account_id": 91,
-        }
-        refreshed_account = {**account, "access_token": "fresh-access", "refresh_token": "fresh-refresh"}
-        with (
-            patch.object(register_api, "require_admin"),
-            patch.object(register_api, "list_registered_accounts", return_value=[account]),
-            patch.object(
-                register_api.sub2api_store,
-                "refresh_grok_account_oauth",
-                return_value={"account": refreshed_account, "method": "sso_reauthorize", "proxy": ""},
-            ) as refresh_grok,
-            patch("services.account_inventory_service._grok_health_and_quota", return_value={"updates": {}}),
-            patch.object(register_api, "account_pool", return_value={"accounts": [refreshed_account]}),
-        ):
-            response = client.post("/api/accounts/grok%3Aexpired%40example.com/refresh-token")
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["refresh_method"], "sso_reauthorize")
-        refresh_grok.assert_called_once_with(account)
 
     def test_cpa_partial_result_remains_structured_http_success(self) -> None:
         client = self._client()

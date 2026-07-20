@@ -12,7 +12,6 @@ from typing import Any
 from services.atomic_json_store import read_json, write_json
 from services.account_token_profile import token_profile
 from services.config import DATA_DIR
-from services.sqlite_store import collection_page, document_signature
 
 
 PARTIAL_ACCOUNTS_FILE = DATA_DIR / "partial_accounts.json"
@@ -85,7 +84,11 @@ def _save(items: list[dict[str, Any]]) -> None:
 
 
 def _source_signature() -> tuple[str, int, int]:
-    return document_signature(PARTIAL_ACCOUNTS_FILE)
+    try:
+        stat = PARTIAL_ACCOUNTS_FILE.stat()
+        return str(PARTIAL_ACCOUNTS_FILE), int(stat.st_mtime_ns), int(stat.st_size)
+    except OSError:
+        return str(PARTIAL_ACCOUNTS_FILE), 0, 0
 
 
 def _preview(value: object, keep: int = 6) -> str:
@@ -195,11 +198,7 @@ def _normalize(item: dict[str, Any]) -> dict[str, Any] | None:
         "last_seen_at": str(item.get("last_seen_at") or now),
         "attempt_count": int(item.get("attempt_count") or 1),
         "web_login_ok": _truthy(item.get("web_login_ok") if "web_login_ok" in item else item.get("chat_test_ok")),
-        "registration_batch_id": str(item.get("registration_batch_id") or item.get("registration_batch") or ""),
-        "registration_batch_label": str(item.get("registration_batch_label") or ""),
     }
-    if not base["registration_batch_id"]:
-        base["registration_batch_id"] = f"legacy-{registered_at[:10]}" if len(registered_at) >= 10 else "legacy-unknown"
     for key in (
         "name",
         "birthdate",
@@ -371,18 +370,10 @@ def partial_account_pool_page(limit: int = 100, offset: int = 0, *, include_secr
     page_limit = max(1, min(500, int(limit or 100)))
     page_offset = max(0, int(offset or 0))
     with _lock:
-        page = collection_page(PARTIAL_ACCOUNTS_FILE, limit=page_limit, offset=page_offset)
-        if page is None:
-            raw_items = [item for item in _load() if isinstance(item, dict)]
-            migrated_page = collection_page(PARTIAL_ACCOUNTS_FILE, limit=page_limit, offset=page_offset)
-            if migrated_page is None:
-                selected = raw_items[page_offset:page_offset + page_limit]
-                total = len(raw_items)
-            else:
-                selected, total = migrated_page
-        else:
-            selected, total = page
+        raw_items = [item for item in _load() if isinstance(item, dict)]
+    selected = raw_items[page_offset:page_offset + page_limit]
     items = [_public(item, include_secret=include_secret) for item in (_normalize(raw) for raw in selected) if item]
+    total = len(raw_items)
     return {
         "items": items,
         "stats": {"total": total},

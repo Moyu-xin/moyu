@@ -4,7 +4,6 @@ from __future__ import annotations
 import json
 import re
 import time
-import uuid
 from copy import deepcopy
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
@@ -15,7 +14,6 @@ from services import task_proxy_service
 from services.atomic_json_store import read_json, write_json
 from services.config import DATA_DIR
 from services.register import mail_provider
-from services.sqlite_store import collection_page, document_signature
 
 MAILBOX_POOL_FILE = DATA_DIR / "mailbox_pool.json"
 _lock = Lock()
@@ -30,10 +28,14 @@ def _now() -> str:
 
 
 def _source_signature() -> tuple:
-    return (
-        document_signature(MAILBOX_POOL_FILE),
-        document_signature(mail_provider.OUTLOOK_TOKEN_USED_FILE),
-    )
+    signature: list[tuple[str, int, int]] = []
+    for path in (MAILBOX_POOL_FILE, mail_provider.OUTLOOK_TOKEN_USED_FILE):
+        try:
+            stat = path.stat()
+            signature.append((str(path), int(stat.st_mtime_ns), int(stat.st_size)))
+        except OSError:
+            signature.append((str(path), 0, 0))
+    return tuple(signature)
 
 
 def _cached_pool(key: tuple[str, bool], signature: tuple) -> dict[str, Any] | None:
@@ -119,14 +121,6 @@ def _default_provider_configs() -> dict[str, Any]:
             "api_key": "",
             "default_domain": "duckmail.sbs",
         },
-        "yyds_mail": {
-            "enable": False,
-            "api_base": "https://maliapi.215.im/v1",
-            "api_key": "",
-            "domain": "",
-            "subdomain": "",
-            "wildcard": False,
-        },
         "openai_cpa": {
             "enable": False,
             "domains": "",
@@ -192,7 +186,7 @@ def _normalize_group_records(raw: Any, raw_items: Any = None) -> list[dict[str, 
 def _normalize_provider_configs(raw: Any) -> dict[str, Any]:
     configs = _default_provider_configs()
     raw = raw if isinstance(raw, dict) else {}
-    allowed_sources = {"outlook_token", "gmail_oauth", "cloudflare_temp_email", "ddg_mail", "duckmail", "yyds_mail", "openai_cpa"}
+    allowed_sources = {"outlook_token", "gmail_oauth", "cloudflare_temp_email", "ddg_mail", "duckmail", "openai_cpa"}
     registration_source = str(raw.get("registration_source") or configs["registration_source"]).strip().lower()
     configs["registration_source"] = registration_source if registration_source in allowed_sources else "outlook_token"
     for key, defaults in [(key, value) for key, value in configs.items() if isinstance(value, dict)]:
@@ -234,13 +228,6 @@ def _normalize_provider_configs(raw: Any) -> dict[str, Any]:
             merged["enable"] = bool(merged.get("enable"))
             merged["api_key"] = str(merged.get("api_key") or "").strip()
             merged["default_domain"] = str(merged.get("default_domain") or "duckmail.sbs").strip() or "duckmail.sbs"
-        if key == "yyds_mail":
-            merged["enable"] = bool(merged.get("enable"))
-            merged["api_base"] = str(merged.get("api_base") or "https://maliapi.215.im/v1").strip().rstrip("/") or "https://maliapi.215.im/v1"
-            merged["api_key"] = str(merged.get("api_key") or "").strip()
-            merged["domain"] = str(merged.get("domain") or "").strip()
-            merged["subdomain"] = str(merged.get("subdomain") or "").strip()
-            merged["wildcard"] = bool(merged.get("wildcard"))
         if key == "openai_cpa":
             merged["enable"] = bool(merged.get("enable"))
             merged["domains"] = str(merged.get("domains") or "").strip()
@@ -294,10 +281,6 @@ def _load_items(store: dict[str, Any] | None = None) -> list[dict[str, Any]]:
             "note": str(raw.get("note") or ""),
             "created_at": str(raw.get("created_at") or _now()),
             "updated_at": str(raw.get("updated_at") or _now()),
-            "inventory_batch_id": str(raw.get("inventory_batch_id") or raw.get("import_batch_id") or ""),
-            "outbound_at": str(raw.get("outbound_at") or ""),
-            "outbound_batch_id": str(raw.get("outbound_batch_id") or ""),
-            "outbound_format": str(raw.get("outbound_format") or ""),
         })
     return items
 
@@ -346,45 +329,10 @@ def _line(item: dict[str, Any]) -> str:
     ])
 
 
-def _mailbox_batch_id(item: dict[str, Any]) -> str:
-    explicit = str(item.get("inventory_batch_id") or item.get("import_batch_id") or "").strip()
-    if explicit:
-        return explicit
-    created = str(item.get("created_at") or "").strip()
-    return f"legacy-{created[:10]}" if len(created) >= 10 else "legacy-unknown"
-
-
-def _split_alias_counts(states: dict[str, dict[str, Any]]) -> dict[str, dict[str, int]]:
-    counts: dict[str, dict[str, int]] = {}
-    for address, entry in states.items():
-        local, separator, domain = str(address or "").strip().lower().partition("@")
-        if not separator or "+" not in local:
-            continue
-        base = f"{local.split('+', 1)[0]}@{domain}"
-        bucket = counts.setdefault(base, {"generated": 0, "used": 0, "failed": 0, "in_use": 0})
-        bucket["generated"] += 1
-        state = str((entry or {}).get("state") or "")
-        if state == "in_use":
-            bucket["in_use"] += 1
-        elif state in {"used", "existing_account"}:
-            bucket["used"] += 1
-        elif state:
-            bucket["failed"] += 1
-    return counts
-
-
-def _with_state(
-    item: dict[str, Any],
-    states: dict[str, dict[str, Any]] | None = None,
-    alias_counts: dict[str, dict[str, int]] | None = None,
-    *,
-    include_secret: bool = True,
-) -> dict[str, Any]:
+def _with_state(item: dict[str, Any], states: dict[str, dict[str, Any]] | None = None, *, include_secret: bool = True) -> dict[str, Any]:
     states = states or _state_map()
-    alias_counts = alias_counts if alias_counts is not None else _split_alias_counts(states)
     entry = states.get(_key(item.get("email"))) or {}
     state = str(entry.get("state") or "unused")
-    split_counts = alias_counts.get(_base_address(str(item.get("email") or "")), {})
     result = {
         "provider_type": item.get("provider_type") or "outlook_token",
         "email": item.get("email") or "",
@@ -395,14 +343,6 @@ def _with_state(
         "note": item.get("note") or "",
         "created_at": item.get("created_at") or "",
         "updated_at": item.get("updated_at") or "",
-        "inventory_batch_id": item.get("inventory_batch_id") or _mailbox_batch_id(item),
-        "outbound_at": item.get("outbound_at") or "",
-        "outbound_batch_id": item.get("outbound_batch_id") or "",
-        "outbound_format": item.get("outbound_format") or "",
-        "split_alias_generated": int(split_counts.get("generated") or 0),
-        "split_alias_used": int(split_counts.get("used") or 0),
-        "split_alias_failed": int(split_counts.get("failed") or 0),
-        "split_alias_in_use": int(split_counts.get("in_use") or 0),
         "client_id": item.get("client_id") or "",
         "has_client_secret": bool(str(item.get("client_secret") or "")),
         "client_secret_preview": _preview(item.get("client_secret")),
@@ -432,8 +372,8 @@ def _preview(value: object, keep: int = 8) -> str:
     return f"{text[:keep]}...{text[-keep:]}"
 
 
-def _stats(items: list[dict[str, Any]], states: dict[str, dict[str, Any]] | None = None) -> dict[str, int]:
-    states = states if states is not None else _state_map()
+def _stats(items: list[dict[str, Any]]) -> dict[str, int]:
+    states = _state_map()
     counts = {
         "total": len(items),
         "outlook_token": 0,
@@ -468,21 +408,14 @@ def _groups(items: list[dict[str, Any]], records: Any = None) -> list[str]:
     return sorted(seen, key=lambda value: (value != DEFAULT_MAILBOX_GROUP, value.lower()))
 
 
-def _group_records_with_counts(
-    items: list[dict[str, Any]],
-    records: Any = None,
-    group_stats: dict[str, dict[str, int]] | None = None,
-) -> list[dict[str, Any]]:
-    counts = group_stats if group_stats is not None else _group_stats(items)
+def _group_records_with_counts(items: list[dict[str, Any]], records: Any = None) -> list[dict[str, Any]]:
+    counts = _group_stats(items)
     normalized = _normalize_group_records(records, items)
     return [{**record, "count": int((counts.get(record["name"]) or {}).get("total") or 0)} for record in normalized]
 
 
-def _group_stats(
-    items: list[dict[str, Any]],
-    states: dict[str, dict[str, Any]] | None = None,
-) -> dict[str, dict[str, int]]:
-    states = states if states is not None else _state_map()
+def _group_stats(items: list[dict[str, Any]]) -> dict[str, dict[str, int]]:
+    states = _state_map()
     result: dict[str, dict[str, int]] = {}
     for item in items:
         group = _normalize_group(item.get("group"))
@@ -509,7 +442,6 @@ def _public_provider_configs(configs: dict[str, Any], *, include_secret: bool = 
     for section, keys in {
         "ddg_mail": ("ddg_token", "cf_inbox_jwt", "admin_password", "cf_api_key"),
         "duckmail": ("api_key",),
-        "yyds_mail": ("api_key",),
         "openai_cpa": ("webhook_secret",),
     }.items():
         cfg = data.get(section) if isinstance(data.get(section), dict) else {}
@@ -537,10 +469,9 @@ def update_provider_configs(updates: dict[str, Any]) -> dict[str, Any]:
             "cloudflare_temp_email": {"admin_password"},
             "ddg_mail": {"ddg_token", "cf_inbox_jwt", "admin_password", "cf_api_key"},
             "duckmail": {"api_key"},
-            "yyds_mail": {"api_key"},
             "openai_cpa": {"webhook_secret"},
         }
-        for key in ("outlook_token", "cloudflare_temp_email", "gmail_oauth", "ddg_mail", "duckmail", "yyds_mail", "openai_cpa"):
+        for key in ("outlook_token", "cloudflare_temp_email", "gmail_oauth", "ddg_mail", "duckmail", "openai_cpa"):
             if isinstance(updates.get(key), dict):
                 current = dict(configs.get(key) or {})
                 for update_key, update_value in updates[key].items():
@@ -563,14 +494,12 @@ def list_mailboxes(*, include_secret: bool = True) -> dict[str, Any]:
         items = _load_items(store)
         configs = store.get("provider_configs") or {}
     states = _state_map()
-    alias_counts = _split_alias_counts(states)
-    group_stats = _group_stats(items, states)
     result = {
-        "items": [_with_state(item, states, alias_counts, include_secret=include_secret) for item in items],
-        "stats": _stats(items, states),
+        "items": [_with_state(item, states, include_secret=include_secret) for item in items],
+        "stats": _stats(items),
         "groups": _groups(items, store.get("groups")),
-        "group_records": _group_records_with_counts(items, store.get("groups"), group_stats),
-        "group_stats": group_stats,
+        "group_records": _group_records_with_counts(items, store.get("groups")),
+        "group_stats": _group_stats(items),
         "default_group": DEFAULT_MAILBOX_GROUP,
         "provider_configs": _public_provider_configs(configs, include_secret=False),
     }
@@ -631,7 +560,6 @@ def import_mailbox_text(text: str, *, provider_type: str = "outlook_token", note
         imported = 0
         updated = 0
         now = _now()
-        import_batch_id = f"mail-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
         for credential in credentials:
             email_key = f"{provider_type}:{_key(credential.get('email'))}"
             if not _key(credential.get("email")):
@@ -652,10 +580,6 @@ def import_mailbox_text(text: str, *, provider_type: str = "outlook_token", note
                 "note": note or (old or {}).get("note", ""),
                 "created_at": (old or {}).get("created_at") or now,
                 "updated_at": now,
-                "inventory_batch_id": (old or {}).get("inventory_batch_id") or import_batch_id,
-                "outbound_at": (old or {}).get("outbound_at") or "",
-                "outbound_batch_id": (old or {}).get("outbound_batch_id") or "",
-                "outbound_format": (old or {}).get("outbound_format") or "",
             }
         items = list(existing.values())
         _save_items(items)
@@ -713,87 +637,6 @@ def serialize_gmail_pool(group: str = "") -> str:
     return serialize_pool("gmail_oauth", group=group)
 
 
-def mailbox_batches(*, provider_type: str = "") -> list[dict[str, Any]]:
-    selected_provider = str(provider_type or "").strip().lower()
-    with _lock:
-        items = _load_items()
-    batches: dict[str, dict[str, Any]] = {}
-    for item in items:
-        if selected_provider and str(item.get("provider_type") or "").lower() != selected_provider:
-            continue
-        batch_id = _mailbox_batch_id(item)
-        bucket = batches.setdefault(batch_id, {
-            "id": batch_id,
-            "created_at": str(item.get("created_at") or ""),
-            "total": 0,
-            "available": 0,
-            "outbound": 0,
-        })
-        bucket["total"] += 1
-        created = str(item.get("created_at") or "")
-        if created and (not bucket["created_at"] or created < bucket["created_at"]):
-            bucket["created_at"] = created
-        if item.get("outbound_at"):
-            bucket["outbound"] += 1
-        else:
-            bucket["available"] += 1
-    return sorted(batches.values(), key=lambda item: str(item.get("created_at") or ""), reverse=True)
-
-
-def select_mailboxes_for_outbound(
-    *,
-    quantity: int = 0,
-    inventory_batch_id: str = "",
-    provider_type: str = "outlook_token",
-    include_outbound: bool = False,
-) -> list[dict[str, Any]]:
-    batch_id = str(inventory_batch_id or "").strip()
-    selected_provider = str(provider_type or "").strip().lower()
-    with _lock:
-        items = _load_items()
-    selected = [
-        item for item in items
-        if (not selected_provider or str(item.get("provider_type") or "").lower() == selected_provider)
-        and (not batch_id or _mailbox_batch_id(item) == batch_id)
-        and (include_outbound or not str(item.get("outbound_at") or "").strip())
-    ]
-    selected.sort(key=lambda item: str(item.get("created_at") or ""))
-    limit = max(0, int(quantity or 0))
-    return selected[:limit] if limit else selected
-
-
-def mark_mailboxes_outbound(items: list[dict[str, Any]], *, export_format: str) -> dict[str, Any]:
-    identities = {
-        f"{str(item.get('provider_type') or '').lower()}:{_key(item.get('email'))}"
-        for item in items
-        if _key(item.get("email"))
-    }
-    if not identities:
-        return {"marked": 0, "outbound_batch_id": "", "outbound_at": ""}
-    outbound_at = _now()
-    outbound_batch_id = f"mail-out-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
-    marked = 0
-    with _lock:
-        stored = _load_items()
-        for item in stored:
-            identity = f"{str(item.get('provider_type') or '').lower()}:{_key(item.get('email'))}"
-            if identity not in identities:
-                continue
-            item.update({
-                "outbound_at": outbound_at,
-                "outbound_batch_id": outbound_batch_id,
-                "outbound_format": str(export_format or "credentials").strip().lower(),
-                "updated_at": outbound_at,
-            })
-            marked += 1
-        _save_items(stored)
-    return {
-        "marked": marked,
-        "outbound_batch_id": outbound_batch_id,
-        "outbound_at": outbound_at,
-    }
-
-
 def _split_csv(value: Any) -> list[str]:
     if isinstance(value, list):
         return [str(item).strip() for item in value if str(item).strip()]
@@ -817,7 +660,6 @@ def apply_to_register_config(register_config: dict[str, Any]) -> dict[str, Any]:
     cf_cfg = configs.get("cloudflare_temp_email") if isinstance(configs.get("cloudflare_temp_email"), dict) else {}
     ddg_cfg = configs.get("ddg_mail") if isinstance(configs.get("ddg_mail"), dict) else {}
     duck_cfg = configs.get("duckmail") if isinstance(configs.get("duckmail"), dict) else {}
-    yyds_cfg = configs.get("yyds_mail") if isinstance(configs.get("yyds_mail"), dict) else {}
     gmail_cfg = configs.get("gmail_oauth") if isinstance(configs.get("gmail_oauth"), dict) else {}
 
     if registration_source == "outlook_token":
@@ -879,17 +721,6 @@ def apply_to_register_config(register_config: dict[str, Any]) -> dict[str, Any]:
             "mailbox_group": "",
             "api_key": str(duck_cfg.get("api_key") or ""),
             "default_domain": str(duck_cfg.get("default_domain") or "duckmail.sbs"),
-        })
-    elif registration_source == "yyds_mail" and bool(yyds_cfg.get("enable")) and yyds_cfg.get("api_key"):
-        providers.append({
-            "enable": True,
-            "type": "yyds_mail",
-            "mailbox_group": "",
-            "api_base": str(yyds_cfg.get("api_base") or "https://maliapi.215.im/v1"),
-            "api_key": str(yyds_cfg.get("api_key") or ""),
-            "domain": _split_csv(yyds_cfg.get("domain")),
-            "subdomain": str(yyds_cfg.get("subdomain") or ""),
-            "wildcard": bool(yyds_cfg.get("wildcard")),
         })
     elif registration_source == "openai_cpa" and bool(cpa_cfg.get("enable")) and cpa_cfg.get("domains") and cpa_cfg.get("webhook_secret"):
         all_domains = _split_csv(cpa_cfg.get("domains"))
@@ -1083,7 +914,7 @@ def prune_unused_mailboxes() -> dict[str, Any]:
 
 
 def _base_address(address: str) -> str:
-    local, sep, domain = str(address or "").strip().lower().partition("@")
+    local, sep, domain = str(address or "").strip().partition("@")
     if not sep:
         return ""
     domain_l = domain.lower()
@@ -1155,14 +986,12 @@ def list_outlook_mailboxes(*, include_secret: bool = True) -> dict[str, Any]:
         store = _load_store()
         items = [item for item in _load_items(store) if str(item.get("provider_type") or "") == "outlook_token"]
     states = _state_map()
-    alias_counts = _split_alias_counts(states)
-    group_stats = _group_stats(items, states)
     result = {
-        "items": [_with_state(item, states, alias_counts, include_secret=include_secret) for item in items],
-        "stats": _stats(items, states),
+        "items": [_with_state(item, states, include_secret=include_secret) for item in items],
+        "stats": _stats(items),
         "groups": _groups(items, store.get("groups")),
-        "group_records": _group_records_with_counts(items, store.get("groups"), group_stats),
-        "group_stats": group_stats,
+        "group_records": _group_records_with_counts(items, store.get("groups")),
+        "group_stats": _group_stats(items),
         "default_group": DEFAULT_MAILBOX_GROUP,
     }
     return _store_cached_pool(cache_key, signature, result)
@@ -1175,16 +1004,14 @@ def list_outlook_mailboxes_page(limit: int = 100, offset: int = 0, *, include_se
         store = _load_store()
         items = [item for item in _load_items(store) if str(item.get("provider_type") or "") == "outlook_token"]
     states = _state_map()
-    alias_counts = _split_alias_counts(states)
-    group_stats = _group_stats(items, states)
     selected = items[page_offset:page_offset + page_limit]
     total = len(items)
     return {
-        "items": [_with_state(item, states, alias_counts, include_secret=include_secret) for item in selected],
-        "stats": _stats(items, states),
+        "items": [_with_state(item, states, include_secret=include_secret) for item in selected],
+        "stats": _stats(items),
         "groups": _groups(items, store.get("groups")),
-        "group_records": _group_records_with_counts(items, store.get("groups"), group_stats),
-        "group_stats": group_stats,
+        "group_records": _group_records_with_counts(items, store.get("groups")),
+        "group_stats": _group_stats(items),
         "default_group": DEFAULT_MAILBOX_GROUP,
         "page_info": {
             "offset": page_offset,

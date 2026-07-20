@@ -37,53 +37,7 @@ class _Session:
         raise AssertionError(url)
 
 
-class _NextAuthFallbackSession:
-    def __init__(self) -> None:
-        self.me_calls = 0
-        self.session_cookies: dict[str, str] = {}
-
-    def get(self, url: str, **kwargs):
-        if url.endswith("/api/auth/session"):
-            self.session_cookies = dict(kwargs.get("cookies") or {})
-            return _Response(200, {"accessToken": "fresh-web-access-token"})
-        if url.endswith("/backend-api/me"):
-            self.me_calls += 1
-            return _Response(401, {"error": {"code": "token_invalidated"}})
-        raise AssertionError(url)
-
-
 class AccountInventoryQuotaTests(unittest.TestCase):
-    def test_generic_401_is_token_invalid_not_banned(self) -> None:
-        self.assertEqual(
-            account_inventory_service._classify_failure(401, '{"code":"token_invalidated"}'),
-            "token_invalid",
-        )
-        self.assertEqual(
-            account_inventory_service._classify_failure(401, "account deactivated"),
-            "banned",
-        )
-
-    def test_nextauth_session_recovers_invalid_web_access_token(self) -> None:
-        session = _NextAuthFallbackSession()
-        account = {
-            "email": "user@example.com",
-            "access_token": "stale-web-access-token",
-            "session_token": "nextauth-session-token",
-            "plan_type": "free",
-        }
-        with patch.object(account_inventory_service, "_session", return_value=session):
-            result = account_inventory_service._local_health_and_quota(account, refresh_quota=False)
-
-        self.assertTrue(result["ok"])
-        self.assertEqual(result["status"], "ok")
-        self.assertEqual(result["status_code"], 200)
-        self.assertTrue(result["nextauth_session_ok"])
-        self.assertEqual(result["nextauth_session_status"], 200)
-        self.assertEqual(result["updates"]["access_token"], "fresh-web-access-token")
-        self.assertEqual(result["updates"]["health_method"], "nextauth_session")
-        self.assertEqual(session.me_calls, 2)
-        self.assertEqual(session.session_cookies["__Secure-next-auth.session-token"], "nextauth-session-token")
-
     def test_wham_usage_is_normalized_as_percentage_quota(self) -> None:
         with patch.object(account_inventory_service, "_session", return_value=_Session()):
             result = account_inventory_service._local_health_and_quota(

@@ -80,9 +80,6 @@ def _default_store() -> dict[str, Any]:
         "strategy": "round_robin",
         "node_mode": "direct_proxy",
         "fallback_proxy": "",
-        "residential_proxies": [],
-        "residential_provider": "custom",
-        "plus_subscription_id": "",
         "node_blacklist": [],
         "fastest_mode": False,
         "max_retry_count": 8,
@@ -130,12 +127,9 @@ def _load() -> dict[str, Any]:
     if store["strategy"] not in {"round_robin", "random"}:
         store["strategy"] = "round_robin"
     store["node_mode"] = str(store.get("node_mode") or "direct_proxy").strip() or "direct_proxy"
-    if store["node_mode"] not in {"direct_proxy", "residential_direct", "mihomo_ports", "managed_mihomo"}:
+    if store["node_mode"] not in {"direct_proxy", "mihomo_ports", "managed_mihomo"}:
         store["node_mode"] = "direct_proxy"
     store["fallback_proxy"] = normalize_proxy_url(str(store.get("fallback_proxy") or "").strip())
-    store["residential_proxies"] = _normalize_residential_proxies(store.get("residential_proxies"))
-    store["residential_provider"] = str(store.get("residential_provider") or "custom").strip()[:80] or "custom"
-    store["plus_subscription_id"] = str(store.get("plus_subscription_id") or "").strip()[:160]
     raw_blacklist = store.get("node_blacklist")
     if isinstance(raw_blacklist, str):
         raw_blacklist = re.split(r"[,，\n]+", raw_blacklist)
@@ -199,25 +193,6 @@ def _normalize_store(raw: dict[str, Any]) -> dict[str, Any]:
     return base
 
 
-def _normalize_residential_proxies(value: Any) -> list[str]:
-    raw_items = value if isinstance(value, list) else str(value or "").replace("\r", "\n").split("\n")
-    items: list[str] = []
-    seen: set[str] = set()
-    for raw in raw_items:
-        line = str(raw or "").strip()
-        if not line or line.startswith("#"):
-            continue
-        if "=" in line and not line.lower().startswith(("http://", "https://", "socks://", "socks5://", "socks5h://")):
-            _label, line = [part.strip() for part in line.split("=", 1)]
-        proxy_url = normalize_proxy_url(line)
-        if _scheme_from_proxy(proxy_url) not in {"http", "https", "socks5", "socks5h"}:
-            continue
-        if proxy_url and proxy_url not in seen:
-            seen.add(proxy_url)
-            items.append(proxy_url)
-    return items
-
-
 def _normalize_subscriptions(value: Any) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -241,7 +216,6 @@ def _normalize_subscriptions(value: Any) -> list[dict[str, Any]]:
             "name": name or url,
             "url": url,
             "enabled": enabled,
-            "allow_private": bool((raw if isinstance(raw, dict) else {}).get("allow_private")),
             "created_at": str((raw if isinstance(raw, dict) else {}).get("created_at") or _now()),
             "updated_at": str((raw if isinstance(raw, dict) else {}).get("updated_at") or _now()),
             "last_error": str((raw if isinstance(raw, dict) else {}).get("last_error") or ""),
@@ -313,10 +287,6 @@ def _public(store: dict[str, Any]) -> dict[str, Any]:
     executable = str(managed.get("executable") or "")
     managed["has_executable"] = bool(executable)
     data["managed_mihomo"] = managed
-    residential = [str(item) for item in data.pop("residential_proxies", []) if str(item).strip()]
-    data["residential_proxy_count"] = len(residential)
-    data["residential_proxy_previews"] = [_proxy_preview(item) for item in residential[:6]]
-    data["has_residential_proxies"] = bool(residential)
     data["stats"] = _stats(data.get("nodes") or [])
     return data
 
@@ -326,19 +296,6 @@ def _preview(value: object, keep: int = 4) -> str:
     if len(text) <= keep * 2:
         return "***" if text else ""
     return f"{text[:keep]}...{text[-keep:]}"
-
-
-def _proxy_preview(value: object) -> str:
-    proxy_url = normalize_proxy_url(str(value or ""))
-    try:
-        parsed = urllib.parse.urlparse(proxy_url)
-    except Exception:
-        return "***"
-    scheme = parsed.scheme or "http"
-    host = parsed.hostname or "unknown"
-    port = f":{parsed.port}" if parsed.port else ""
-    username = urllib.parse.unquote(parsed.username or "")
-    return f"{scheme}://{_preview(username, 3)}@{host}{port}" if username else f"{scheme}://{host}{port}"
 
 
 def _stats(nodes: list[dict[str, Any]]) -> dict[str, int]:
@@ -356,11 +313,6 @@ def get_proxy_pool_config(*, include_secret: bool = False) -> dict[str, Any]:
     with _lock:
         store = _load()
     return store if include_secret else _public(store)
-
-
-def residential_proxy_urls() -> list[str]:
-    with _lock:
-        return list(_load().get("residential_proxies") or [])
 
 
 def _mihomo_headers(mihomo: dict[str, Any], *, json_body: bool = False) -> dict[str, str]:
@@ -472,15 +424,9 @@ def _mihomo_select_node(mihomo: dict[str, Any], node_name: str) -> None:
 def update_proxy_pool_config(updates: dict[str, Any]) -> dict[str, Any]:
     with _lock:
         store = _load()
-        for key in ("enabled", "mode", "strategy", "node_mode", "fallback_proxy", "residential_provider", "plus_subscription_id", "node_blacklist", "fastest_mode", "max_retry_count", "retry_delay"):
+        for key in ("enabled", "mode", "strategy", "node_mode", "fallback_proxy", "node_blacklist", "fastest_mode", "max_retry_count", "retry_delay"):
             if key in updates:
                 store[key] = updates[key]
-        if "residential_proxy_text" in updates:
-            store["residential_proxies"] = _normalize_residential_proxies(updates.get("residential_proxy_text"))
-        elif isinstance(updates.get("residential_proxies"), list):
-            store["residential_proxies"] = _normalize_residential_proxies(updates.get("residential_proxies"))
-        if bool(updates.get("clear_residential_proxies")):
-            store["residential_proxies"] = []
         if isinstance(updates.get("mihomo"), dict):
             mihomo = dict(store.get("mihomo") or {})
             for key, value in updates["mihomo"].items():
@@ -503,8 +449,6 @@ def update_proxy_pool_config(updates: dict[str, Any]) -> dict[str, Any]:
                     continue
                 if "enabled" in patch:
                     subscription["enabled"] = bool(patch.get("enabled"))
-                if "allow_private" in patch:
-                    subscription["allow_private"] = bool(patch.get("allow_private"))
                 if str(patch.get("name") or "").strip():
                     subscription["name"] = str(patch.get("name") or "").strip()
                 subscription["updated_at"] = _now()
@@ -821,29 +765,6 @@ def assign_proxy(
         return items[assignment_index % len(items)]
 
     direct_nodes = [node for node in nodes if str(node.get("proxy_url") or "").strip()]
-    if node_mode == "residential_direct":
-        residential = [str(item) for item in store.get("residential_proxies") or [] if str(item).strip()]
-        selected_proxy = random.choice(residential) if strategy == "random" and residential else (
-            residential[assignment_index % len(residential)] if residential else ""
-        )
-        if selected_proxy:
-            return {
-                "proxy": normalize_proxy_url(selected_proxy),
-                "source": "residential_direct",
-                "node_id": _id_for("residential", selected_proxy),
-                "label": f"住宅代理 {assignment_index % len(residential) + 1}/{len(residential)}",
-                "slot": slot + 1,
-                "purpose": str(purpose or ""),
-            }
-        return {
-            "proxy": fallback_proxy,
-            "source": "fallback",
-            "requested_source": "residential_direct",
-            "label": "住宅代理池为空",
-            "slot": slot + 1,
-            "purpose": str(purpose or ""),
-            "error": "住宅直连模式已启用，但住宅代理池为空",
-        }
     if node_mode == "direct_proxy" and direct_nodes:
         node = choose(direct_nodes)
         assert node is not None
@@ -988,17 +909,12 @@ class _SafeSubscriptionRedirectHandler(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
-def _fetch_text(
-    url: str,
-    *,
-    allow_private: bool = False,
-    user_agent: str = "Mozilla/5.0 (MoyuRegister/1.0)",
-) -> str:
+def _fetch_text(url: str, *, allow_private: bool = False) -> str:
     safe_url = _validate_subscription_url(url, allow_private=allow_private, resolve=True)
     req = urllib.request.Request(
         safe_url,
         headers={
-            "User-Agent": str(user_agent or "Mozilla/5.0 (MoyuRegister/1.0)"),
+            "User-Agent": "Mozilla/5.0 (MoyuRegister/1.0)",
             "Accept": "text/plain,application/yaml,application/json,*/*",
         },
         method="GET",

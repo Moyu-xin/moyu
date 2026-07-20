@@ -14,8 +14,7 @@ try:
 except ValueError:
     PORT = 8000
 
-os.environ.setdefault("STORAGE_BACKEND", "sqlite")
-os.environ.setdefault("CHATGPT2API_AUTO_RESUME_PLUS_TASKS", "1")
+os.environ.setdefault("STORAGE_BACKEND", "json")
 sys.path.insert(0, str(DEPS))
 
 LOG_DIR.mkdir(parents=True, exist_ok=True)

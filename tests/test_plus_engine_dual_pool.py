@@ -6,7 +6,6 @@ from services.plus_engine import app as engine
 
 
 records: list[tuple[str, str]] = []
-stripe_sessions: list[tuple[str, "FakeSession"]] = []
 http_calls: list[dict[str, Any]] = []
 http_status_by_path: dict[str, int] = {}
 
@@ -64,8 +63,6 @@ parent_proxy = "http://127.0.0.1:42000"
 base_711_proxy = "USER123456-zone-custom:fixturepass@global.example.711proxy.invalid:10000"
 rotated_711_proxy = engine.rotate_kookeey_proxy_session(base_711_proxy, "US", stage="checkout", slot=1)
 assert "USER123456-zone-custom-region-US-session-" in rotated_711_proxy
-assert "-sessTime-5" in rotated_711_proxy
-assert "sessAuto" not in rotated_711_proxy
 assert ":fixturepass@global.example.711proxy.invalid:10000" in rotated_711_proxy
 req = engine.LongLinkRequest(
     accessToken="token",
@@ -78,7 +75,6 @@ req = engine.LongLinkRequest(
     batch_checkout_proxy_country="US",
     billing_country="US",
     payment_method_country="US",
-    paypal_confirm_mode="payment_method",
     promotion_country="JP",
     approve_same_as_checkout=True,
     provider_same_as_target=False,
@@ -91,9 +87,8 @@ class FakeCheckoutResponse(FakeResponse):
 
 
 class FakeCheckoutSession(FakeSession):
-    def post(self, url: str, **kwargs: Any) -> FakeCheckoutResponse:
+    def post(self, url: str, **_kwargs: Any) -> FakeCheckoutResponse:
         assert url.endswith("/backend-api/payments/checkout")
-        assert "promo_campaign" not in dict(kwargs.get("json") or {})
         return FakeCheckoutResponse()
 
 
@@ -125,34 +120,8 @@ assert len(stripe_init_session.post_data) == 1
 stripe_js_id_key = "elements_session_client[stripe_js_id]"
 assert stripe_init_session.get_params[0][stripe_js_id_key]
 assert stripe_init_session.get_params[0][stripe_js_id_key] == stripe_init_session.post_data[0][stripe_js_id_key]
-minimal_init_session = FakeStripeInitSession()
-minimal_req = req.model_copy(update={"paypal_confirm_protocol": "minimal"})
-minimal_init_result = engine.stripe_init(
-    "cs_test",
-    minimal_req,
-    checkout=checkout_result,
-    stripe_session=minimal_init_session,
-)
-assert minimal_init_result["stripe_hosted_url"].startswith("https://checkout.stripe.com/c/pay/cs_test")
-assert minimal_init_session.get_params == []
-assert len(minimal_init_session.post_data) == 1
-assert minimal_init_session.post_data[0]["redirect_type"] == "url"
-assert "_stripe_version" not in minimal_init_session.post_data[0]
 assert engine.is_retryable_provider_flow_exception(
     engine.HTTPException(status_code=504, detail="provider failed: curl: (56) CONNECT tunnel failed, response 502")
-)
-assert engine.classify_paypal_availability(
-    {"payment_method_preference": {"ordered_payment_method_types": ["card", "paypal"]}}
-)["status"] == "supported"
-assert engine.classify_paypal_availability(
-    {"payment_method_preference": {"ordered_payment_method_types": ["card", "link"]}}
-)["status"] == "unsupported"
-assert engine.classify_paypal_availability({"config_id": "cfg_test"})["status"] == "unknown"
-assert not engine.is_retryable_provider_flow_exception(
-    engine.HTTPException(
-        status_code=422,
-        detail="paypal_unavailable_for_left_country: country=US; paypal_availability=unsupported",
-    )
 )
 
 
@@ -190,49 +159,17 @@ checkout = {
     "currency": "USD",
 }
 
-patched_engine_names = (
-    "new_session",
-    "billing_for_country",
-    "build_stripe_session",
-    "stripe_init",
-    "stripe_amount_info",
-    "stripe_context",
-    "stripe_create_payment_method",
-    "stripe_confirm",
-    "stripe_payment_page_redirect_url",
-)
-original_engine_values = {name: getattr(engine, name) for name in patched_engine_names}
-
 engine.new_session = lambda: FakeSession()
-engine.billing_for_country = lambda country: {**billing, "country": country}
-def fake_build_stripe_session(
-    _req: Any,
-    proxy_override: str = "",
-    source_session: FakeSession | None = None,
-) -> FakeSession:
-    session = FakeSession(proxy_override)
-    engine.copy_session_state(source_session, session)
-    stripe_sessions.append(("build", session))
-    return session
-
-
-engine.build_stripe_session = fake_build_stripe_session
+engine.billing_for_country = lambda _country: dict(billing)
+engine.build_stripe_session = lambda _req, proxy_override="": FakeSession(proxy_override)
 
 
 def fake_stripe_init(*_args: Any, stripe_session: FakeSession, **_kwargs: Any) -> dict[str, str]:
     records.append(("stripe_init", stripe_session.proxy))
-    stripe_session.cookies["stripe_init_cookie"] = "preserved"
-    return {
-        "test_amount": "0",
-        "stripe_hosted_url": "https://chatgpt.com/pay/test",
-        "payment_method_types": ["card", "paypal"],
-    }
+    return {"test_amount": "0", "stripe_hosted_url": "https://chatgpt.com/pay/test"}
 
 
 engine.stripe_init = fake_stripe_init
-engine.stripe_update_tax_region = lambda session, *_args, **_kwargs: (
-    records.append(("stripe_tax", session.proxy)) or "http_200"
-)
 engine.stripe_amount_info = lambda payload: (str(payload.get("test_amount", "0")), "test")
 chatgpt = FakeSession(left_proxy)
 chatgpt.headers.update(
@@ -244,7 +181,7 @@ chatgpt.headers.update(
 )
 chatgpt.cookies["session"] = "test-session"
 
-init_payload, hosted_url, prepared_billing, prepared_stripe = engine.prepare_paypal_after_sync(
+init_payload, hosted_url, prepared_billing = engine.prepare_paypal_after_sync(
     chatgpt,
     checkout,
     req,
@@ -254,18 +191,14 @@ init_payload, hosted_url, prepared_billing, prepared_stripe = engine.prepare_pay
 assert init_payload["test_amount"] == "0"
 assert hosted_url == "https://chatgpt.com/pay/test"
 assert prepared_billing["country"] == "US"
-assert prepared_stripe.cookies["stripe_init_cookie"] == "preserved"
 assert records == [
     ("checkout_update", right_proxy),
     ("checkout_taxes", right_proxy),
     ("stripe_init", left_proxy),
-    ("stripe_tax", left_proxy),
-    ("stripe_init", left_proxy),
 ]
 assert http_calls[0]["json"]["promo_campaign"]["promo_campaign_id"] == "plus-1-month-free"
-assert http_calls[1]["json"]["billing_country"] == "JP"
+assert http_calls[1]["json"]["billing_country"] == "US"
 assert http_calls[1]["json"]["currency"] == "usd"
-assert http_calls[0]["session"] is http_calls[1]["session"]
 for call in http_calls:
     assert call["session"].headers["oai-device-id"] == "device-test"
     assert call["session"].cookies["session"] == "test-session"
@@ -273,30 +206,9 @@ for call in http_calls:
 records.clear()
 engine.stripe_context = lambda *_args, **_kwargs: {"checkout_amount": "0", "currency": "usd"}
 engine.stripe_amount_info = lambda _payload: ("0", "test")
-
-
-def fake_create_payment_method(session: FakeSession, *_args: Any, **_kwargs: Any) -> str:
-    stripe_sessions.append(("payment_method", session))
-    records.append(("payment_method", session.proxy))
-    return "pm_test"
-
-
-def fake_confirm(session: FakeSession, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
-    stripe_sessions.append(("confirm", session))
-    records.append(("confirm", session.proxy))
-    session.cookies["stripe_confirm_cookie"] = "preserved"
-    return {}
-
-
-def fake_poll(session: FakeSession, *_args: Any, **_kwargs: Any) -> str:
-    stripe_sessions.append(("poll", session))
-    records.append(("poll", session.proxy))
-    return "https://www.paypal.com/agreements/approve?ba_token=test"
-
-
-engine.stripe_create_payment_method = fake_create_payment_method
-engine.stripe_confirm = fake_confirm
-engine.stripe_payment_page_redirect_url = fake_poll
+engine.stripe_create_payment_method = lambda session, *_args, **_kwargs: records.append(("payment_method", session.proxy)) or "pm_test"
+engine.stripe_confirm = lambda session, *_args, **_kwargs: records.append(("confirm", session.proxy)) or {}
+engine.stripe_payment_page_redirect_url = lambda session, *_args, **_kwargs: records.append(("poll", session.proxy)) or "https://www.paypal.com/agreements/approve?ba_token=test"
 result = engine.create_provider_link(
     chatgpt,
     checkout,
@@ -306,7 +218,6 @@ result = engine.create_provider_link(
     provider_proxy=left_proxy,
     promotion_proxy=right_proxy,
     billing=billing,
-    stripe_session=prepared_stripe,
 )
 assert result["long_url"].startswith("https://www.paypal.com/agreements/approve")
 assert records == [
@@ -314,39 +225,6 @@ assert records == [
     ("confirm", left_proxy),
     ("poll", right_proxy),
 ]
-payment_session = next(session for label, session in stripe_sessions if label == "payment_method")
-confirm_session = next(session for label, session in stripe_sessions if label == "confirm")
-poll_session = next(session for label, session in stripe_sessions if label == "poll")
-assert payment_session is prepared_stripe
-assert confirm_session is prepared_stripe
-assert poll_session is not prepared_stripe
-assert poll_session.proxy == right_proxy
-assert poll_session.cookies["stripe_init_cookie"] == "preserved"
-assert poll_session.cookies["stripe_confirm_cookie"] == "preserved"
-
-records.clear()
-stripe_sessions.clear()
-req.stripe_poll_egress = "provider"
-result = engine.create_provider_link(
-    chatgpt,
-    checkout,
-    {"test_amount": "0"},
-    hosted_url,
-    req,
-    provider_proxy=left_proxy,
-    promotion_proxy=right_proxy,
-    billing=billing,
-    stripe_session=prepared_stripe,
-)
-assert result["long_url"].startswith("https://www.paypal.com/agreements/approve")
-assert records == [
-    ("payment_method", left_proxy),
-    ("confirm", left_proxy),
-    ("poll", left_proxy),
-]
-provider_poll_session = next(session for label, session in stripe_sessions if label == "poll")
-assert provider_poll_session is prepared_stripe
-req.stripe_poll_egress = "promotion"
 
 records.clear()
 http_calls.clear()
@@ -367,9 +245,5 @@ else:
 assert records == [
     ("checkout_update", right_proxy),
     ("checkout_taxes", right_proxy),
-    ("checkout_taxes", right_proxy),
-    ("checkout_taxes", right_proxy),
 ]
-for name, value in original_engine_values.items():
-    setattr(engine, name, value)
 print("plus engine dual pool routing ok")

@@ -38,11 +38,7 @@ function Resolve-ProjectPython {
 
     $Candidates = @()
     if ($env:CHATGPT2API_PYTHON) {
-        $ConfiguredPython = [System.IO.Path]::GetFullPath($env:CHATGPT2API_PYTHON)
-        $ProjectVenvRoot = [System.IO.Path]::GetFullPath((Join-Path $RootPath ".venv"))
-        if (-not $SkipProjectVenv -or -not $ConfiguredPython.StartsWith($ProjectVenvRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
-            $Candidates += $ConfiguredPython
-        }
+        $Candidates += $env:CHATGPT2API_PYTHON
     }
     if (-not $SkipProjectVenv) {
         $Candidates += (Join-Path $RootPath ".venv\Scripts\python.exe")

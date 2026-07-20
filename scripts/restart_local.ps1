@@ -1,26 +1,21 @@
 $ErrorActionPreference = "Stop"
 
 $Root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
-$RuntimeScript = Join-Path $Root "scripts\local_runtime.ps1"
-. $RuntimeScript
+$LogFile = Join-Path $Root "logs\restart.log"
+New-Item -ItemType Directory -Force -Path (Split-Path -Parent $LogFile) | Out-Null
 
-$PythonExe = Resolve-ProjectPython -RootPath $Root -SkipProjectVenv
-$RestartService = Join-Path $Root "scripts\restart_service.py"
-$Grok2ApiTunnel = Join-Path $Root "scripts\ensure_grok2api_tunnel.ps1"
+function Write-RestartLog {
+    param([string]$Message)
+    Add-Content -LiteralPath $LogFile -Encoding utf8 -Value "$(Get-Date -Format o) $Message"
+}
 
+Start-Sleep -Seconds 2
 try {
-    & $Grok2ApiTunnel
-    if ($LASTEXITCODE -ne 0) {
-        Write-Warning "grok2api SSH tunnel exited with code $LASTEXITCODE; continuing local service restart."
-    }
-}
-catch {
-    # Grok2api is an optional integration. A remote SSH/tunnel outage must not
-    # prevent local registration and Plus services from loading new code.
-    Write-Warning "grok2api SSH tunnel is unavailable; continuing local service restart: $($_.Exception.Message)"
-}
-
-& $PythonExe $RestartService $Root
-if ($LASTEXITCODE -ne 0) {
-    exit $LASTEXITCODE
+    Write-RestartLog "Restart requested."
+    & (Join-Path $Root "stop_local.ps1") | ForEach-Object { Write-RestartLog ([string]$_) }
+    & (Join-Path $Root "start_local.ps1") | ForEach-Object { Write-RestartLog ([string]$_) }
+    Write-RestartLog "Restart completed."
+} catch {
+    Write-RestartLog "Restart failed: $($_.Exception.Message)"
+    exit 1
 }

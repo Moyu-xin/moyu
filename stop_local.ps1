@@ -118,40 +118,12 @@ function Get-AuthKey {
     }
 }
 
-function Stop-OwnedGrokSolver {
-    param([string]$RootPath)
-    $SolverPidFile = Join-Path $RootPath "data\grok_solver\solver.pid"
-    $SolverScript = [System.IO.Path]::GetFullPath((Join-Path $RootPath "services\grok\turnstile_solver\api_solver.py"))
-    if (-not (Test-Path -LiteralPath $SolverPidFile)) {
-        return
-    }
-    try {
-        $Record = Get-Content -LiteralPath $SolverPidFile -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
-        $SolverProcessId = [int]$Record.pid
-        $CimProcess = Get-CimInstance Win32_Process -Filter "ProcessId = $SolverProcessId" -ErrorAction SilentlyContinue
-        $CommandLine = [string]$CimProcess.CommandLine
-        if ($CimProcess -and $CommandLine.IndexOf($SolverScript, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
-            $Children = Get-CimInstance Win32_Process -Filter "ParentProcessId = $SolverProcessId" -ErrorAction SilentlyContinue
-            foreach ($Child in $Children) {
-                Stop-Process -Id ([int]$Child.ProcessId) -Force -ErrorAction SilentlyContinue
-            }
-            Stop-Process -Id $SolverProcessId -Force -ErrorAction SilentlyContinue
-            Write-Output "Stopped Grok Turnstile Solver PID $SolverProcessId"
-        }
-    } catch {
-        Write-Output "Grok Solver cleanup skipped: $($_.Exception.Message)"
-    } finally {
-        Remove-Item -LiteralPath $SolverPidFile -Force -ErrorAction SilentlyContinue
-    }
-}
-
 $PidRecord = Read-PidRecord -Path $PidFile -ExpectedScript $ServeScript -ExpectedPort $DefaultPort
 if (-not $PidRecord) {
     Remove-Item -LiteralPath $PidFile -Force -ErrorAction SilentlyContinue
     $PidRecord = Find-OwnedListenerRecord -ExpectedScript $ServeScript -ExpectedPort $DefaultPort
     if (-not $PidRecord) {
         Write-Output "No verified project process is listening on port $DefaultPort."
-        Stop-OwnedGrokSolver -RootPath $Root
         exit 0
     }
     Write-Output "Recovered project process from port $DefaultPort because the PID file was missing or invalid."
@@ -197,46 +169,13 @@ if ($Process) {
 } else {
     $Unowned = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
     if ($Unowned) {
-        $ExpectedPath = [System.IO.Path]::GetFullPath($ServeScript)
-        $Listener = Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object { [int]$_.LocalPort -eq $DefaultPort -and [int]$_.OwningProcess -eq $ProcessId } | Select-Object -First 1
-        $CimProcess = Get-CimInstance Win32_Process -Filter "ProcessId = $ProcessId" -ErrorAction SilentlyContinue
-        $CommandLine = [string]$CimProcess.CommandLine
-        $RuntimeVerified = [bool]($Listener -and $CimProcess -and $CommandLine.IndexOf($ExpectedPath, [System.StringComparison]::OrdinalIgnoreCase) -ge 0)
-        if (-not $RuntimeVerified) {
-            $RecordPathMatches = $PidRecord.script -and [System.IO.Path]::GetFullPath([string]$PidRecord.script) -eq $ExpectedPath
-            $RecordPortMatches = -not $PidRecord.port -or [int]$PidRecord.port -eq $DefaultPort
-            $StartMatches = $false
-            try {
-                $RecordedStart = [DateTimeOffset]::Parse([string]$PidRecord.started_at).UtcDateTime
-                $ActualStart = $Unowned.StartTime.ToUniversalTime()
-                $StartMatches = [Math]::Abs(($ActualStart - $RecordedStart).TotalSeconds) -le 10
-            } catch {
-                $StartMatches = $false
-            }
-            $ApiMatches = $false
-            try {
-                $AuthKey = Get-AuthKey -RootPath $Root
-                if ($AuthKey) {
-                    $Probe = Invoke-RestMethod -Method Get -Uri "http://127.0.0.1:$DefaultPort/api/register" -Headers @{ Authorization = "Bearer $AuthKey" } -TimeoutSec 5
-                    $ApiMatches = $null -ne $Probe.register
-                }
-            } catch {
-                $ApiMatches = $false
-            }
-            $RuntimeVerified = [bool]($RecordPathMatches -and $RecordPortMatches -and $StartMatches -and $ApiMatches)
-        }
-        if ($RuntimeVerified) {
-            Stop-Process -Id $ProcessId -Force -ErrorAction SilentlyContinue
-            Write-Output "Stopped verified project PID $ProcessId from port $DefaultPort."
+        $RecoveredRecord = Find-OwnedListenerRecord -ExpectedScript $ServeScript -ExpectedPort $DefaultPort
+        if ($RecoveredRecord) {
+            $RecoveredId = [int]$RecoveredRecord.pid
+            Stop-Process -Id $RecoveredId -Force -ErrorAction SilentlyContinue
+            Write-Output "PID $ProcessId was stale; stopped verified project PID $RecoveredId from port $DefaultPort."
         } else {
-            $RecoveredRecord = Find-OwnedListenerRecord -ExpectedScript $ServeScript -ExpectedPort $DefaultPort
-            if ($RecoveredRecord) {
-                $RecoveredId = [int]$RecoveredRecord.pid
-                Stop-Process -Id $RecoveredId -Force -ErrorAction SilentlyContinue
-                Write-Output "PID $ProcessId was stale; stopped verified project PID $RecoveredId from port $DefaultPort."
-            } else {
-                Write-Output "PID $ProcessId does not belong to this project; it was not stopped."
-            }
+            Write-Output "PID $ProcessId does not belong to this project; it was not stopped."
         }
     } else {
         Write-Output "PID $ProcessId is not running."
@@ -244,7 +183,6 @@ if ($Process) {
 }
 
 Remove-Item -LiteralPath $PidFile -Force -ErrorAction SilentlyContinue
-Stop-OwnedGrokSolver -RootPath $Root
 } finally {
     if ($HasControlLock) {
         $ControlMutex.ReleaseMutex()

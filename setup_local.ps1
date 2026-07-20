@@ -41,15 +41,6 @@ if (-not $SkipBackendInstall) {
     if (-not (Invoke-PythonProbe -Executable $VenvPython)) {
         throw "The project virtual environment was created but its Python executable is not usable."
     }
-    $CamoufoxPath = @(& $VenvPython -m camoufox path 2>$null)
-    if ($LASTEXITCODE -ne 0 -or -not ($CamoufoxPath | Where-Object { [string]$_ -and (Test-Path -LiteralPath (([string]$_).Trim())) })) {
-        & $VenvPython -m camoufox fetch
-        Assert-NativeSuccess "Camoufox browser installation"
-    }
-    & $VenvPython -m patchright install chromium
-    Assert-NativeSuccess "Patchright Chromium installation"
-    & $VenvPython -m playwright install chromium
-    Assert-NativeSuccess "Playwright Chromium installation"
 }
 
 if (-not $SkipFrontendBuild) {

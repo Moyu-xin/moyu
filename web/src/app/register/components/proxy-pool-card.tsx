@@ -54,7 +54,6 @@ export function ProxyPoolCard() {
   const [subText, setSubText] = useState("");
   const [allowPrivateSubscription, setAllowPrivateSubscription] = useState(false);
   const [nodeText, setNodeText] = useState("");
-  const [residentialText, setResidentialText] = useState("");
   const [query, setQuery] = useState("");
   const [selectedNodeId, setSelectedNodeId] = useState("");
   const managedThreads = useSettingsStore((state) => Math.max(1, Number(state.registerConfig?.threads) || 1));
@@ -110,7 +109,6 @@ export function ProxyPoolCard() {
         strategy: pool.strategy,
         node_mode: pool.node_mode,
         fallback_proxy: pool.fallback_proxy,
-        plus_subscription_id: pool.plus_subscription_id,
         node_blacklist: pool.node_blacklist,
         fastest_mode: pool.fastest_mode,
         max_retry_count: pool.max_retry_count,
@@ -118,10 +116,8 @@ export function ProxyPoolCard() {
         mihomo: pool.mihomo,
         managed_mihomo: pool.managed_mihomo,
         subscriptions: pool.subscriptions,
-        ...(residentialText.trim() ? { residential_proxy_text: residentialText } : {}),
       });
       setPool(data.proxy_pool);
-      setResidentialText("");
       toast.success(data.hot_reload.running
         ? `代理配置已热更新至 r${data.hot_reload.revision}，进行中任务保持原节点`
         : `${Z.save}${Z.ok}，下次任务直接生效`);
@@ -135,10 +131,6 @@ export function ProxyPoolCard() {
   const patchSubscription = (id: string, enabled: boolean) => setPool((current) => current ? {
     ...current,
     subscriptions: current.subscriptions.map((item) => item.id === id ? { ...item, enabled } : item),
-  } : current);
-  const patchSubscriptionPrivateAccess = (id: string, allowPrivate: boolean) => setPool((current) => current ? {
-    ...current,
-    subscriptions: current.subscriptions.map((item) => item.id === id ? { ...item, allow_private: allowPrivate } : item),
   } : current);
 
   const installManaged = async () => {
@@ -353,7 +345,6 @@ export function ProxyPoolCard() {
                 className="h-10 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm"
               >
                 <option value="direct_proxy">直接 HTTP / SOCKS</option>
-                <option value="residential_direct">住宅代理直连</option>
                 <option value="managed_mihomo">项目托管 Mihomo</option>
                 <option value="mihomo_ports">外部 Clash / Mihomo</option>
               </select>
@@ -392,57 +383,6 @@ export function ProxyPoolCard() {
             </div>
           </div>
 
-          {pool.node_mode === "residential_direct" ? (
-            <div className="grid gap-3 border-y border-emerald-200 bg-emerald-50 px-3 py-4 md:grid-cols-[180px_minmax(0,1fr)]">
-              <div>
-                <div className="text-sm font-semibold text-emerald-950">住宅代理直连池</div>
-                <p className="mt-1 text-xs leading-5 text-emerald-800">项目直接连接住宅代理，不使用机场订阅。支持标准 URL、host:port:user:pass、user:pass@host:port 以及竖线分隔格式。</p>
-                <Badge variant={pool.residential_proxy_count ? "success" : "warning"} className="mt-2 rounded-md">
-                  已保存 {pool.residential_proxy_count || 0} 条
-                </Badge>
-              </div>
-              <div className="space-y-2">
-                <Input
-                  value={pool.residential_provider || "custom"}
-                  onChange={(event) => patchPool({ residential_provider: event.target.value })}
-                  placeholder="供应商，例如 Kookeey / 711 / Luna"
-                  className="h-10 bg-white"
-                />
-                <Textarea
-                  value={residentialText}
-                  onChange={(event) => setResidentialText(event.target.value)}
-                  placeholder={"gate.kookeey.info:1000:username:password-TH-session-5m\nuser:pass@host:port\nhttp://user:pass@host:port"}
-                  className="min-h-32 bg-white font-mono text-xs"
-                />
-                {pool.residential_proxy_previews?.length ? (
-                  <div className="flex flex-wrap gap-1.5">
-                    {pool.residential_proxy_previews.map((item) => <Badge key={item} variant="secondary" className="rounded-md font-mono text-[10px]">{item}</Badge>)}
-                  </div>
-                ) : null}
-                <div className="flex flex-wrap gap-2">
-                  <Button
-                    variant="outline"
-                    className="h-8 border-rose-200 bg-white text-rose-700"
-                    disabled={saving || !pool.residential_proxy_count}
-                    onClick={async () => {
-                      setSaving(true);
-                      try {
-                        const data = await updateProxyPool({ clear_residential_proxies: true });
-                        setPool(data.proxy_pool);
-                        setResidentialText("");
-                      } finally {
-                        setSaving(false);
-                      }
-                    }}
-                  >
-                    <Trash2 className="size-3.5" />清空住宅池
-                  </Button>
-                  <span className="self-center text-xs text-emerald-700">部署主机位于海外时可直接开启；本地网络无法直连住宅供应商时，应使用项目已有的住宅转接功能。</span>
-                </div>
-              </div>
-            </div>
-          ) : null}
-
           {pool.node_mode === "managed_mihomo" ? (
             <div className="grid gap-3 rounded-xl border border-emerald-200 bg-emerald-50 p-3 md:grid-cols-4">
               <div className="flex flex-wrap items-center justify-between gap-2 md:col-span-4">
@@ -461,21 +401,13 @@ export function ProxyPoolCard() {
               <div className="space-y-1"><label className="text-xs font-semibold text-emerald-900">代理端口基数</label><Input value={String(pool.managed_mihomo?.proxy_port_base || 42000)} onChange={(event) => patchManaged({ proxy_port_base: Number(event.target.value) || 42000 })} className="h-10 rounded-xl bg-white" /></div>
               <div className="space-y-1"><label className="text-xs font-semibold text-emerald-900">API 端口基数</label><Input value={String(pool.managed_mihomo?.api_port_base || 43000)} onChange={(event) => patchManaged({ api_port_base: Number(event.target.value) || 43000 })} className="h-10 rounded-xl bg-white" /></div>
               <div className="space-y-1"><label className="text-xs font-semibold text-emerald-900">注册线程出口数</label><Input value={String(managedThreads)} readOnly disabled className="h-10 rounded-xl bg-white" /></div>
-              <div className="space-y-1 md:col-span-2">
-                <label className="text-xs font-semibold text-emerald-900">Plus 提链专用订阅</label>
-                <select value={pool.plus_subscription_id || ""} onChange={(event) => patchPool({ plus_subscription_id: event.target.value })} className="h-10 w-full rounded-xl border border-emerald-200 bg-white px-3 text-sm">
-                  <option value="">未指定（兼容 Plus 页面旧筛选）</option>
-                  {pool.subscriptions.filter((item) => item.enabled).map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
-                </select>
-                <p className="text-xs leading-5 text-emerald-700">仅 Plus 的 711 父代理使用该订阅；注册仍使用全部已启用订阅。</p>
-              </div>
               <div className="flex flex-wrap items-end gap-2 md:col-span-4">
                 <Button variant="outline" className="h-9 rounded-xl border-emerald-200 bg-white" onClick={() => void installManaged()} disabled={saving}><Download className="size-4" />安装核心</Button>
                 <Button className="h-9 rounded-xl bg-emerald-600 text-white hover:bg-emerald-700" onClick={() => void startManaged()} disabled={saving || !pool.subscriptions.some((item) => item.enabled)}>{saving ? <LoaderCircle className="size-4 animate-spin" /> : <Play className="size-4" />}启动出口</Button>
                 <Button variant="outline" className="h-9 rounded-xl border-emerald-200 bg-white" onClick={() => void previewAssignments()} disabled={saving || !(managedStatus?.running || 0)}><RefreshCw className="size-4" />验证轮换</Button>
                 <Button variant="outline" className="h-9 rounded-xl border-rose-200 bg-white text-rose-700" onClick={() => void stopManaged()} disabled={saving || !(managedStatus?.running || 0)}><Square className="size-4" />停止</Button>
               </div>
-              {managedStatus?.instances?.length ? <div className="grid gap-2 md:col-span-4 md:grid-cols-2">{managedStatus.instances.map((item) => <div key={item.slot} className="flex items-center justify-between gap-2 rounded-lg border border-emerald-200 bg-white px-3 py-2 text-xs"><span className="font-semibold text-slate-700">{item.purpose === "plus_parent_proxy" ? "Plus 提链" : item.purpose === "registration" ? "注册" : item.purpose || "待分配"} · 端口 {item.proxy_url}</span><span className="max-w-[50%] truncate text-emerald-700">{item.selected || "等待分配"}</span></div>)}</div> : null}
+              {managedStatus?.instances?.length ? <div className="grid gap-2 md:col-span-4 md:grid-cols-2">{managedStatus.instances.map((item) => <div key={item.slot} className="flex items-center justify-between gap-2 rounded-lg border border-emerald-200 bg-white px-3 py-2 text-xs"><span className="font-semibold text-slate-700">线程 {item.slot} · {item.proxy_url}</span><span className="max-w-[50%] truncate text-emerald-700">{item.selected || "等待分配"}</span></div>)}</div> : null}
               {assignmentPreview.length ? <div className="md:col-span-4 overflow-hidden rounded-lg border border-emerald-200 bg-white"><div className="grid grid-cols-[70px_70px_minmax(0,1fr)] border-b border-emerald-100 bg-emerald-50 px-3 py-2 text-xs font-semibold text-emerald-900"><span>任务</span><span>线程</span><span>分配节点</span></div>{assignmentPreview.map((item, index) => <div key={`${index}-${item.slot}-${item.label}`} className="grid grid-cols-[70px_70px_minmax(0,1fr)] border-b border-slate-100 px-3 py-2 text-xs last:border-0"><span>{index + 1}</span><span>{item.slot || "-"}</span><span className={item.error ? "truncate text-rose-700" : "truncate text-slate-700"}>{item.error || item.label || item.proxy || "-"}</span></div>)}</div> : null}
               {managedStatus?.last_error ? <div className="md:col-span-4 rounded-lg border border-rose-200 bg-rose-50 p-2 text-xs text-rose-700">{managedStatus.last_error}</div> : null}
             </div>
@@ -654,7 +586,7 @@ export function ProxyPoolCard() {
                       <div className="flex min-w-0 items-start gap-2">
                         <Checkbox checked={item.enabled} onCheckedChange={(checked) => patchSubscription(item.id, Boolean(checked))} />
                         <div className="min-w-0">
-                        <div className="flex items-center gap-2"><div className="truncate font-semibold text-slate-900">{item.name}</div>{pool.plus_subscription_id === item.id ? <Badge variant="info" className="shrink-0 rounded-md">Plus 专用</Badge> : null}</div>
+                        <div className="truncate font-semibold text-slate-900">{item.name}</div>
                         <div className="truncate font-mono text-slate-500 mt-0.5">{item.url}</div>
                         </div>
                       </div>
@@ -667,7 +599,6 @@ export function ProxyPoolCard() {
                     ) : (
                       <div className="mt-1 text-slate-500 text-[11px]">{Z.nodes}: {item.last_imported || 0}</div>
                     )}
-                    <label className="mt-2 flex items-center gap-2 text-[11px] text-slate-600"><Checkbox checked={Boolean(item.allow_private)} onCheckedChange={(checked) => patchSubscriptionPrivateAccess(item.id, Boolean(checked))} /><span>允许本机/局域网订阅地址</span></label>
                   </div>
                 ))
               )}

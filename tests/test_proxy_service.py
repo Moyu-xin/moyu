@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from unittest.mock import MagicMock, patch
 
-from services import plus_link_store, proxy_service
+from services import proxy_service
 from services.proxy_service import ProxySettingsStore
 
 
@@ -22,34 +22,6 @@ class StubConfig:
 class ProxySettingsStoreTests(unittest.TestCase):
     def _store(self, *, runtime: dict | None = None, legacy_proxy: str = "") -> ProxySettingsStore:
         return ProxySettingsStore(StubConfig(runtime=runtime, legacy_proxy=legacy_proxy))
-
-    def test_normalize_common_residential_proxy_formats(self) -> None:
-        expected = "http://example-user:example-secret-TH-session-5m@gate.kookeey.info:1000"
-        self.assertEqual(
-            proxy_service.normalize_proxy_url(
-                "gate.kookeey.info:1000:example-user:example-secret-TH-session-5m"
-            ),
-            expected,
-        )
-        self.assertEqual(
-            proxy_service.normalize_proxy_url(
-                "example-user:example-secret-TH-session-5m@gate.kookeey.info:1000"
-            ),
-            expected,
-        )
-        self.assertEqual(
-            proxy_service.normalize_proxy_url(
-                "gate.kookeey.info|1000|example-user|example-secret-TH-session-5m"
-            ),
-            expected,
-        )
-
-    def test_plus_common_residential_pool_understands_provider_country_suffix(self) -> None:
-        thailand = "gate.kookeey.info:1000:user:password-TH-session-5m"
-        brazil = "gate.kookeey.info:1000:user:password-BR-session-5m"
-
-        self.assertEqual(plus_link_store._proxy_country_hint(thailand), "TH")
-        self.assertEqual(plus_link_store._matching_common_proxy_pool([thailand, brazil], "TH"), [thailand])
 
     def test_explicit_task_proxy_overrides_runtime_single_proxy(self) -> None:
         store = self._store(runtime={

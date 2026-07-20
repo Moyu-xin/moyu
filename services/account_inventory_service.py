@@ -17,9 +17,6 @@ from services import mailbox_pool_store, proxy_pool_store, sub2api_store
 from services.account_token_profile import SUB2API_OAUTH_CLIENT_ID
 from services.atomic_json_store import read_json, write_json
 from services.config import DATA_DIR, DEFAULT_PROXY_RUNTIME_USER_AGENT
-from services.grok.oauth import CLI_BASE_URL as GROK_CLI_BASE_URL
-from services.grok.oauth import CLI_HEADERS as GROK_CLI_HEADERS
-from services.grok.oauth import GROK_CLI_CLIENT_ID, TOKEN_ENDPOINT as GROK_TOKEN_ENDPOINT
 from services.proxy_service import proxy_settings
 from services.security_redaction import redact_text, redact_value
 from services.registered_account_store import (
@@ -37,7 +34,6 @@ MAX_TASK_LOGS = 1500
 MAX_TASK_RESULTS = 1500
 AUTH_BASE = "https://auth.openai.com"
 CHATGPT_BASE = "https://chatgpt.com"
-CHATGPT_SESSION_URL = f"{CHATGPT_BASE}/api/auth/session"
 PLATFORM_OAUTH_CLIENT_ID = "app_2SKx67EdpoN0G6j64rFvigXD"
 PLATFORM_OAUTH_REDIRECT_URI = "https://platform.openai.com/auth/callback"
 SUB2API_OAUTH_REDIRECT_URI = "http://localhost:1455/auth/callback"
@@ -672,21 +668,23 @@ def probe_plus_link_eligibility(
 
     upstream = session or _session(proxy)
     me_status, me_data, me_text = _safe_backend_get(upstream, token, "/backend-api/me", timeout=25)
-    if me_status in {401, 403}:
+    if me_status != 200:
+        auth_failure = me_status in {401, 403}
         return {
             "ok": False,
             "eligible": False,
-            "reason": "token_invalid",
-            "detail": f"access_token 上游验证失败: HTTP {me_status}",
+            "reason": "token_invalid" if auth_failure else "upstream_unavailable",
+            "detail": (
+                f"access_token 上游验证失败: HTTP {me_status}"
+                if auth_failure
+                else f"账号资格检测无法访问 ChatGPT: HTTP {me_status or 0} {_compact_error(me_text, 180)}"
+            ),
             "account_type": "unknown",
             "has_email": bool(str(context.get("email") or "").strip()),
             "expires_at": expires_at,
             "me_status_code": me_status,
         }
 
-    # `/backend-api/me` can be temporarily unavailable while the models endpoint
-    # remains healthy. Continue with the independent models check so a transient
-    # ChatGPT account-service circuit breaker does not kill the entire task.
     models_status, models_data, models_text = _safe_backend_get(
         upstream,
         token,
@@ -707,25 +705,6 @@ def probe_plus_link_eligibility(
         }
 
     model_checked = models_status == 200
-    if me_status != 200 and not model_checked:
-        return {
-            "ok": False,
-            "eligible": False,
-            "reason": "upstream_unavailable",
-            "detail": (
-                f"账号资格检测无法访问 ChatGPT: me HTTP {me_status or 0} "
-                f"{_compact_error(me_text, 120)}; models HTTP {models_status or 0} "
-                f"{_compact_error(models_text, 120)}"
-            ),
-            "account_type": "unknown",
-            "has_email": bool(str(context.get("email") or "").strip()),
-            "expires_at": expires_at,
-            "me_status_code": me_status,
-            "models_status_code": models_status,
-            "type_ok_count": 0,
-            "model_checked": False,
-        }
-
     model_summary = _extract_model_summary(models_data) if model_checked else {}
     model_plan = _infer_plan_from_models(model_summary) if model_checked else ""
     explicit_plan = _normalize_plan(_extract_plan(me_data) or context.get("plan_type"))
@@ -741,9 +720,8 @@ def probe_plus_link_eligibility(
             "expires_at": expires_at,
             "me_status_code": me_status,
             "models_status_code": models_status,
-            "type_ok_count": int(me_status == 200) + int(model_checked),
+            "type_ok_count": 1,
             "model_checked": model_checked,
-            "degraded_validation": me_status != 200 or models_status != 200,
         }
 
     has_email = bool(str(context.get("email") or _extract_email_from_payload(me_data)).strip())
@@ -768,23 +746,22 @@ def probe_plus_link_eligibility(
         "me_status_code": me_status,
         "models_status_code": models_status,
         "available_model_count": int(model_summary.get("available_model_count") or 0),
-        "type_ok_count": int(me_status == 200) + int(model_checked),
+        "type_ok_count": 1 + int(model_checked),
         "model_checked": model_checked,
-        "degraded_validation": me_status != 200 or models_status != 200,
     }
 
 
 def _looks_banned(status_code: int, body: str) -> bool:
     lowered = str(body or "").lower()
-    return any(marker in lowered for marker in ["deactivated", "suspended", "disabled", "banned", "account_closed", "account deactivated", "封禁"])
+    if any(marker in lowered for marker in ["deactivated", "suspended", "disabled", "banned", "account_closed", "account deactivated", "封禁"]):
+        return True
+    return status_code == 401 and any(marker in lowered for marker in ["invalid", "unauthorized", "expired"])
 
 
 HEALTH_STATUS_LABELS: dict[str, str] = {
     "ok": "存活",
     "missing_token": "缺少 Token",
     "missing_sub2api_id": "缺少 sub2api ID",
-    "browser_check_required": "需浏览器测活",
-    "missing_registration_proxy": "缺少注册节点",
     "token_expired": "Token 过期",
     "token_invalid": "Token 无效",
     "auth_invalid": "鉴权失败",
@@ -929,62 +906,15 @@ def _local_health_and_quota(account: dict[str, Any], *, refresh_quota: bool = Tr
     me_text = str(getattr(me_resp, "text", "") or "")
     me_data = _response_json(me_resp)
     status_code = int(getattr(me_resp, "status_code", 0) or 0)
-    initial_access_status_code = status_code
-    nextauth_session_ok: bool | None = None
-    nextauth_session_status = 0
-    nextauth_session_error = ""
-    session_token = str(account.get("session_token") or "").strip()
-    if status_code != 200 and session_token:
-        try:
-            session_resp = session.get(
-                CHATGPT_SESSION_URL,
-                headers={"Accept": "application/json", "Referer": f"{CHATGPT_BASE}/"},
-                cookies={
-                    "__Secure-next-auth.session-token": session_token,
-                    "next-auth.session-token": session_token,
-                },
-                timeout=45,
-                verify=proxy_settings.verify_tls(),
-            )
-            nextauth_session_status = int(getattr(session_resp, "status_code", 0) or 0)
-            session_data = _response_json(session_resp)
-            session_access_token = str(session_data.get("accessToken") or session_data.get("access_token") or "").strip()
-            if nextauth_session_status == 200 and session_access_token:
-                nextauth_session_ok = True
-                access_token = session_access_token
-                token_updates.update({
-                    "access_token": access_token,
-                    "oauth_status": "chatgpt_nextauth_session_refreshed",
-                    "token_refresh_required": False,
-                })
-                ctx = _token_context(access_token, id_token)
-                retry_resp = session.get(
-                    f"{CHATGPT_BASE}/backend-api/me",
-                    headers=_headers(access_token),
-                    timeout=45,
-                    verify=proxy_settings.verify_tls(),
-                )
-                me_resp = retry_resp
-                me_text = str(getattr(retry_resp, "text", "") or "")
-                me_data = _response_json(retry_resp)
-                status_code = int(getattr(retry_resp, "status_code", 0) or 0)
-            elif nextauth_session_status in {401, 404} or (nextauth_session_status == 200 and not session_access_token):
-                nextauth_session_ok = False
-            else:
-                nextauth_session_error = _compact_error(session_data, 500)
-        except Exception as error:
-            nextauth_session_error = _compact_error(error, 500)
     updates: dict[str, Any] = {**token_updates}
-    health_via_nextauth = nextauth_session_ok is True
-    effective_health_code = 200 if health_via_nextauth else status_code
-    updates.update({"health_checked_at": _now(), "health_method": "nextauth_session" if health_via_nextauth else "local", "health_code": effective_health_code, "health_latency_ms": int((time.perf_counter() - started) * 1000)})
+    updates.update({"health_checked_at": _now(), "health_method": "local", "health_code": status_code, "health_latency_ms": int((time.perf_counter() - started) * 1000)})
     preserve_existing_plan = bool(force_refresh_token and refresh_failed_status)
     base_plan = _normalize_plan((account.get("plan_type") or account.get("account_type")) if preserve_existing_plan else (ctx.get("plan_type") or account.get("plan_type") or account.get("account_type")))
     updates.update({key: value for key, value in {"chatgpt_account_id": ctx.get("chatgpt_account_id"), "chatgpt_user_id": ctx.get("chatgpt_user_id"), "client_id": ctx.get("client_id") or account.get("client_id"), "token_expires_at": ctx.get("expires_at"), "token_expires_in": ctx.get("expires_in")}.items() if value not in (None, "")})
     if base_plan:
         updates.update(_plan_updates(base_plan, account, allow_downgrade=not force_refresh_token and not preserve_existing_plan))
 
-    if status_code == 200 or health_via_nextauth:
+    if status_code == 200:
         updates["health_status"] = "ok"
         updates["status"] = "active"
         models_summary: dict[str, Any] = {}
@@ -1055,236 +985,18 @@ def _local_health_and_quota(account: dict[str, Any], *, refresh_quota: bool = Tr
         if refresh_quota and quota_status_value == "unknown":
             updates["last_quota_error"] = "接口返回成功，但未解析到额度字段"
             updates["quota_error_status"] = "quota_unknown"
-        result = {"ok": True, "quota_ok": quota_ok, "type_refresh_ok": bool(force_refresh_token and updates.get("plan_type")), "method": "local", "status": "ok", "status_label": _status_label("ok"), "status_code": effective_health_code, "access_token_status_code": initial_access_status_code, "nextauth_session_ok": nextauth_session_ok, "nextauth_session_status": nextauth_session_status, "latency_ms": updates["health_latency_ms"], "plan_type": updates.get("plan_type"), "account_type": updates.get("account_type"), "plan_refresh_source": updates.get("plan_refresh_source"), "oauth_status": updates.get("oauth_status"), "oauth_refresh_status": updates.get("oauth_refresh_status"), "oauth_refresh_error": updates.get("oauth_refresh_error"), "quota": {key: updates.get(key) for key in ("quota_status", "quota_used", "quota_total", "quota_remaining", "quota_reset_at", "last_quota_error", "quota_error_status") if key in updates}, "models": models_summary, "type_refresh": type_refresh_summary, "updates": updates}
+        result = {"ok": True, "quota_ok": quota_ok, "type_refresh_ok": bool(force_refresh_token and updates.get("plan_type")), "method": "local", "status": "ok", "status_label": _status_label("ok"), "status_code": status_code, "latency_ms": updates["health_latency_ms"], "plan_type": updates.get("plan_type"), "account_type": updates.get("account_type"), "plan_refresh_source": updates.get("plan_refresh_source"), "oauth_status": updates.get("oauth_status"), "oauth_refresh_status": updates.get("oauth_refresh_status"), "oauth_refresh_error": updates.get("oauth_refresh_error"), "quota": {key: updates.get(key) for key in ("quota_status", "quota_used", "quota_total", "quota_remaining", "quota_reset_at", "last_quota_error", "quota_error_status") if key in updates}, "models": models_summary, "type_refresh": type_refresh_summary, "updates": updates}
         updates["last_health_result"] = {k: v for k, v in result.items() if k != "updates"}
         return result
 
     error_text = json.dumps(me_data, ensure_ascii=False)
-    if session_token and nextauth_session_ok is None:
-        health_status = _classify_failure(
-            nextauth_session_status,
-            nextauth_session_error,
-            default="blocked" if nextauth_session_status == 403 else "network_error" if nextauth_session_status == 0 else "failed",
-        )
-    else:
-        health_status = _classify_failure(status_code, me_text or error_text)
+    health_status = _classify_failure(status_code, me_text or error_text)
     status = "banned" if health_status == "banned" else "invalid" if health_status in {"invalid", "token_invalid", "token_expired", "auth_invalid"} else str(account.get("status") or "active")
     updates.update({"health_status": health_status, "status": status, "health_error": _compact_error(error_text, 800)})
     if refresh_quota:
         updates.update(_quota_failure_updates(updates["health_error"], health_status))
-    result = {"ok": False, "quota_ok": False, "method": "local", "status": health_status, "status_label": _status_label(health_status), "status_code": status_code, "access_token_status_code": initial_access_status_code, "nextauth_session_ok": nextauth_session_ok, "nextauth_session_status": nextauth_session_status, "latency_ms": updates["health_latency_ms"], "error": updates["health_error"], "oauth_status": updates.get("oauth_status"), "oauth_refresh_status": updates.get("oauth_refresh_status"), "oauth_refresh_error": updates.get("oauth_refresh_error"), "updates": updates}
+    result = {"ok": False, "quota_ok": False, "method": "local", "status": health_status, "status_label": _status_label(health_status), "status_code": status_code, "latency_ms": updates["health_latency_ms"], "error": updates["health_error"], "oauth_status": updates.get("oauth_status"), "oauth_refresh_status": updates.get("oauth_refresh_status"), "oauth_refresh_error": updates.get("oauth_refresh_error"), "updates": updates}
     updates["last_health_result"] = {k: v for k, v in result.items() if k != "updates"}
-    return result
-
-
-def _grok_refresh_tokens(account: dict[str, Any], *, proxy: str = "") -> dict[str, Any]:
-    refresh_token = str(account.get("refresh_token") or "").strip()
-    if not refresh_token:
-        raise RuntimeError("Grok refresh_token missing")
-    endpoint = str(account.get("token_endpoint") or GROK_TOKEN_ENDPOINT).strip()
-    client_id = str(account.get("client_id") or GROK_CLI_CLIENT_ID).strip()
-    session = _session(proxy)
-    response = session.post(
-        endpoint,
-        data={"grant_type": "refresh_token", "client_id": client_id, "refresh_token": refresh_token},
-        headers={"accept": "application/json", "content-type": "application/x-www-form-urlencoded"},
-        timeout=45,
-        verify=proxy_settings.verify_tls(),
-    )
-    data = _response_json(response)
-    status_code = int(getattr(response, "status_code", 0) or 0)
-    if status_code != 200:
-        detail = _compact_error(data or getattr(response, "text", ""), 500)
-        raise RuntimeError(f"Grok refresh_token failed: HTTP {status_code}{(': ' + detail) if detail else ''}")
-    access_token = str(data.get("access_token") or "").strip()
-    if not access_token:
-        raise RuntimeError("Grok refresh_token response missing access_token")
-    expires_in = max(0, int(data.get("expires_in") or 21600))
-    return {
-        "access_token": access_token,
-        "refresh_token": str(data.get("refresh_token") or refresh_token).strip(),
-        "id_token": str(data.get("id_token") or account.get("id_token") or "").strip(),
-        "token_type": str(data.get("token_type") or account.get("token_type") or "Bearer").strip(),
-        "client_id": client_id,
-        "token_endpoint": endpoint,
-        "token_expires_in": expires_in,
-        "token_expires_at": int(time.time()) + expires_in if expires_in else 0,
-        "oauth_refreshed_at": _now(),
-    }
-
-
-def _grok_health_and_quota(account: dict[str, Any], *, refresh_quota: bool = True, proxy: str = "") -> dict[str, Any]:
-    started = time.perf_counter()
-    access_token = str(account.get("access_token") or "").strip()
-    refresh_token = str(account.get("refresh_token") or "").strip()
-    sso_token = str(account.get("sso_token") or account.get("sso") or "").strip()
-    token_updates: dict[str, Any] = {}
-    refresh_error = ""
-    claims = _jwt_payload(access_token)
-    try:
-        expires_at = int(account.get("token_expires_at") or claims.get("exp") or 0)
-    except Exception:
-        expires_at = 0
-    token_expiring = bool(expires_at and expires_at <= int(time.time()) + 300)
-
-    if refresh_token and (not access_token or token_expiring):
-        try:
-            refreshed = _grok_refresh_tokens(account, proxy=proxy)
-            access_token = str(refreshed.get("access_token") or "").strip()
-            token_expiring = False
-            token_updates.update(refreshed)
-            token_updates.update({
-                "oauth_status": "ready",
-                "oauth_refresh_status": "ok",
-                "oauth_refresh_error": "",
-                "token_refresh_required": False,
-            })
-        except Exception as error:
-            refresh_error = _compact_error(error, 500)
-            token_updates.update({
-                "oauth_status": "refresh_failed",
-                "oauth_refresh_status": _classify_failure(0, f"refresh_token {refresh_error}", default="refresh_token_refresh_failed"),
-                "oauth_refresh_error": refresh_error,
-                "token_refresh_required": True,
-            })
-
-    method = "grok_oauth" if access_token and not token_expiring else "grok_sso"
-    status_code = 0
-    response_data: dict[str, Any] = {}
-    response_text = ""
-    final_url = ""
-
-    if method == "grok_oauth":
-        session = _session(proxy)
-        headers = {str(key): str(value) for key, value in GROK_CLI_HEADERS.items()}
-        account_headers = account.get("headers") if isinstance(account.get("headers"), dict) else {}
-        headers.update({str(key): str(value) for key, value in account_headers.items() if str(key).strip() and value is not None})
-        headers.update({"accept": "application/json", "authorization": f"Bearer {access_token}"})
-        base_url = str(account.get("base_url") or GROK_CLI_BASE_URL).strip().rstrip("/")
-        response = session.get(
-            f"{base_url}/models",
-            headers=headers,
-            timeout=45,
-            verify=proxy_settings.verify_tls(),
-        )
-        status_code = int(getattr(response, "status_code", 0) or 0)
-        response_text = str(getattr(response, "text", "") or "")
-        response_data = _response_json(response)
-        final_url = f"{base_url}/models"
-        # A stale OAuth token does not mean the xAI account itself is dead. Fall
-        # back to the SSO session so SSO-only inventory can still be classified.
-        if status_code == 401 and sso_token:
-            token_updates.update({
-                "oauth_status": "token_invalid",
-                "oauth_refresh_status": "token_invalid",
-                "oauth_refresh_error": _compact_error(response_data or response_text, 500),
-                "token_refresh_required": True,
-            })
-            method = "grok_sso"
-
-    if method == "grok_sso":
-        if not sso_token:
-            error_text = refresh_error or "缺少 Grok OAuth access_token 和 xAI SSO"
-            health_status = token_updates.get("oauth_refresh_status") or "missing_token"
-            updates = {
-                **token_updates,
-                "health_status": health_status,
-                "health_error": error_text,
-                "health_checked_at": _now(),
-                "health_method": method,
-                "health_code": 0,
-                "health_latency_ms": int((time.perf_counter() - started) * 1000),
-            }
-            if refresh_quota:
-                updates.update(_quota_failure_updates(error_text, str(health_status)))
-            return {
-                "ok": False,
-                "quota_ok": False,
-                "method": method,
-                "status": health_status,
-                "status_label": _status_label(health_status),
-                "status_code": 0,
-                "error": error_text,
-                "updates": updates,
-            }
-        session = _session(proxy)
-        session.cookies.set("sso", sso_token, domain=".x.ai")
-        response = session.get(
-            "https://accounts.x.ai/",
-            headers={"accept": "text/html,application/xhtml+xml", "user-agent": DEFAULT_PROXY_RUNTIME_USER_AGENT},
-            allow_redirects=True,
-            timeout=45,
-            verify=proxy_settings.verify_tls(),
-        )
-        status_code = int(getattr(response, "status_code", 0) or 0)
-        response_text = str(getattr(response, "text", "") or "")
-        response_data = _response_json(response)
-        final_url = str(getattr(response, "url", "") or "https://accounts.x.ai/")
-
-    login_redirect = method == "grok_sso" and any(marker in final_url.lower() for marker in ("/sign-in", "/sign-up", "/login"))
-    ok = 200 <= status_code < 400 and not login_redirect
-    latency_ms = int((time.perf_counter() - started) * 1000)
-    quota = {"quota_status": "unavailable"} if refresh_quota else {}
-    updates: dict[str, Any] = {
-        **token_updates,
-        "health_checked_at": _now(),
-        "health_method": method,
-        "health_code": status_code,
-        "health_latency_ms": latency_ms,
-    }
-    if ok:
-        models = response_data.get("data") if isinstance(response_data.get("data"), list) else []
-        model_ids = [str(item.get("id") or "") for item in models if isinstance(item, dict) and item.get("id")]
-        updates.update({
-            "health_status": "ok",
-            "health_error": "",
-            "status": "active",
-            "plan_type": "grok",
-            "oauth_status": "ready" if method == "grok_oauth" else "sso_only",
-        })
-        if refresh_quota:
-            updates.update({
-                "quota_status": "unavailable",
-                "quota_source": "grok-health",
-                "quota_checked_at": _now(),
-                "quota_error_status": "",
-                "last_quota_error": "",
-            })
-        result = {
-            "ok": True,
-            "quota_ok": False,
-            "method": method,
-            "status": "ok",
-            "status_label": _status_label("ok"),
-            "status_code": status_code,
-            "latency_ms": latency_ms,
-            "oauth_status": updates.get("oauth_status"),
-            "quota": quota,
-            "models": {"available_model_count": len(model_ids), "model_ids": model_ids[:50]},
-            "updates": updates,
-        }
-        updates["last_health_result"] = {key: value for key, value in result.items() if key != "updates"}
-        return result
-
-    error_body: Any = response_data or response_text or final_url or refresh_error
-    health_status = "token_invalid" if login_redirect else _classify_failure(status_code, error_body)
-    error_text = "xAI SSO 已跳转到登录页" if login_redirect else _compact_error(error_body, 800)
-    account_status = "invalid" if health_status in {"token_invalid", "token_expired", "auth_invalid"} else str(account.get("status") or "active")
-    updates.update({"health_status": health_status, "health_error": error_text, "status": account_status})
-    if refresh_quota:
-        updates.update(_quota_failure_updates(error_text, health_status))
-    result = {
-        "ok": False,
-        "quota_ok": False,
-        "method": method,
-        "status": health_status,
-        "status_label": _status_label(health_status),
-        "status_code": status_code,
-        "latency_ms": latency_ms,
-        "error": error_text,
-        "updates": updates,
-    }
-    updates["last_health_result"] = {key: value for key, value in result.items() if key != "updates"}
     return result
 
 
@@ -1313,7 +1025,6 @@ class AccountInventoryService:
         self._job_lock = threading.Lock()
         self._runner: threading.Thread | None = None
         self._scheduler: threading.Thread | None = None
-        self._stop_event = threading.Event()
         self._bulk_active = False
         self._last_progress_save_at = 0.0
         self._state = self._load_state()
@@ -1471,7 +1182,6 @@ class AccountInventoryService:
                 state["busy"] = True
                 state["message"] = "已有账号库存任务正在运行"
                 return state
-            self._stop_event.clear()
             self._state = _default_state()
             self._state["enabled"] = True
             self._state["current_job"] = {"job_id": uuid.uuid4().hex, "options": options, "started_at": _now()}
@@ -1487,7 +1197,6 @@ class AccountInventoryService:
         return self.get(include_pool=include_pool)
 
     def stop(self, *, include_pool: bool = True) -> dict[str, Any]:
-        self._stop_event.set()
         with self._lock:
             self._state["enabled"] = False
             self._save_state()
@@ -1500,16 +1209,13 @@ class AccountInventoryService:
     def check_account(self, account: dict[str, Any], *, method: str = "auto", refresh_quota: bool = True, model_id: str = "", prompt: str = "hi", mode: str = "", proxy: str = "") -> dict[str, Any]:
         method = str(method or "auto").strip().lower()
         email = str(account.get("email") or "").strip()
-        platform = str(account.get("platform") or "openai").strip().lower()
-        # Grok registration historically stored only a temporary local Mihomo
-        # port. Health checks must use the freshly assigned pool proxy instead.
-        effective_proxy = str(proxy or ("" if platform == "grok" else account.get("proxy")) or "").strip()
+        effective_proxy = str(proxy or account.get("proxy") or "").strip()
         result: dict[str, Any] | None = None
         errors: list[str] = []
         if method == "sub2api" and not account.get("sub2api_account_id"):
             status = "missing_sub2api_id"
             result = {"ok": False, "quota_ok": False, "method": "sub2api", "status": status, "status_label": _status_label(status), "status_code": 0, "error": "账号没有 sub2api_account_id", "updates": {"health_status": status, "health_error": "账号没有 sub2api_account_id", "health_checked_at": _now(), "health_method": "sub2api"}}
-        if result is None and method in {"auto", "sub2api"} and account.get("sub2api_account_id") and not (method == "auto" and refresh_quota and platform != "grok"):
+        if result is None and method in {"auto", "sub2api"} and account.get("sub2api_account_id") and not (method == "auto" and refresh_quota):
             try:
                 result = _sub2api_health(account, model_id=model_id, prompt=prompt or "hi", mode=mode or "")
             except Exception as error:
@@ -1520,10 +1226,7 @@ class AccountInventoryService:
         if result is None and method in {"auto", "local"}:
             try:
                 force_refresh_token = str(mode or "").strip().lower() in {"refresh_token", "force_refresh_token", "refresh_type"}
-                if platform == "grok":
-                    result = _grok_health_and_quota(account, refresh_quota=refresh_quota, proxy=effective_proxy)
-                else:
-                    result = _local_health_and_quota(account, refresh_quota=refresh_quota, proxy=effective_proxy, force_refresh_token=force_refresh_token)
+                result = _local_health_and_quota(account, refresh_quota=refresh_quota, proxy=effective_proxy, force_refresh_token=force_refresh_token)
             except Exception as error:
                 errors.append(f"local: {error}")
                 status = _classify_failure(0, str(error))
@@ -1627,7 +1330,7 @@ class AccountInventoryService:
         def is_enabled() -> bool:
             if respect_enabled:
                 with self._lock:
-                    return bool(self._state.get("enabled")) and not self._stop_event.is_set()
+                    return bool(self._state.get("enabled"))
             return True
 
         def run_one(index: int, account: dict[str, Any]) -> dict[str, Any]:
@@ -1636,15 +1339,12 @@ class AccountInventoryService:
                 result: dict[str, Any] = {}
                 assignment: dict[str, Any] = {}
                 for attempt in range(1, 4):
-                    if respect_enabled and not is_enabled():
-                        return {"_cancelled": True, "_account": account, "email": email}
-                    platform = str(account.get("platform") or "openai").strip().lower()
                     assignment = proxy_pool_store.assign_proxy(
                         index + (attempt - 1) * max(1, len(accounts)),
                         total_threads=concurrency,
                         slot_index=(index - 1) % concurrency,
                         purpose="inventory_health",
-                        account=None if platform == "grok" else account,
+                        account=account,
                         validate_node=False,
                     )
                     if assignment.get("sticky_failure"):
@@ -1718,8 +1418,6 @@ class AccountInventoryService:
 
         def record_result(result: dict[str, Any]) -> None:
             nonlocal success, fail
-            if result.pop("_cancelled", False):
-                return
             account = result.pop("_account", None)
             ok_for_task = bool(result.pop("_ok_for_task", False))
             banned_for_task = bool(result.pop("_banned_for_task", False))
@@ -1791,7 +1489,6 @@ class AccountInventoryService:
                     executor.shutdown(wait=False, cancel_futures=True)
                     futures.clear()
 
-        stopped = bool(respect_enabled and self._stop_event.is_set())
         with self._lock:
             self._state.setdefault("stats", {}).update({"done": len(results), "success": success, "fail": fail, "running": 0, "updated_at": _now()})
             self._save_state()
@@ -1800,11 +1497,8 @@ class AccountInventoryService:
             removed_result = delete_registered_accounts(banned_accounts, reason="drop_banned_after_health_check")
             removed = int(removed_result.get("removed") or 0)
             self._append_log(f"已剔除不可用账号 {removed} 个", "yellow")
-        if stopped:
-            self._append_log(f"{task_label}任务已停止：已完成={len(results)}/{len(accounts)}，成功={success}，失败={fail}", "yellow")
-        else:
-            self._append_log(f"{task_label}任务结束：成功={success}，失败={fail}，剔除={removed}", "green" if fail == 0 else "yellow")
-        return {"ok": fail == 0 and not stopped, "stopped": stopped, "success": success, "fail": fail, "total": len(accounts), "processed": len(results), "removed": removed, "results": results, "checked_at": _now(), "account_pool": account_pool()}
+        self._append_log(f"{task_label}任务结束：成功={success}，失败={fail}，剔除={removed}", "green" if fail == 0 else "yellow")
+        return {"ok": fail == 0, "success": success, "fail": fail, "total": len(results), "removed": removed, "results": results, "checked_at": _now(), "account_pool": account_pool()}
 
     def _schedule_loop(self) -> None:
         while True:

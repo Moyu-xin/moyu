@@ -22,37 +22,6 @@ function logLevel(level?: string) {
   return { label: "INFO", className: "border-sky-500/25 bg-sky-500/10 text-sky-300" };
 }
 
-type FailureReason = {
-  code: string;
-  label: string;
-  count: number;
-  last_error?: string;
-};
-
-function failureGroup(item: FailureReason) {
-  const code = String(item.code || "other");
-  const error = String(item.last_error || "").toLowerCase();
-  if (["turnstile_timeout", "turnstile_unsolvable", "solver_error"].includes(code) || /turnstile|captcha|solver|yescaptcha/.test(error)) {
-    return { code: "captcha", label: "打码失败" };
-  }
-  if (["email_timeout", "email_error", "email_verification_rejected"].includes(code) || /邮箱|验证码|mailbox|email verification/.test(error)) {
-    return { code: "email", label: "邮箱接码失败" };
-  }
-  if (["region_blocked", "cloudflare_blocked", "rate_limited", "auth_flow_blocked", "account_creation_rejected"].includes(code)) {
-    return { code: "xai_risk", label: "xAI 风控" };
-  }
-  if (code === "signup_page_error") return { code: "xai_page", label: "xAI 页面异常" };
-  if (code === "proxy_network_error") return { code: "proxy", label: "代理/网络失败" };
-  if (["sso_error", "oauth_error"].includes(code)) return { code: "oauth", label: "SSO/OAuth 失败" };
-  if (code === "account_exists") return { code: "account_exists", label: "账号已存在" };
-  if (code === "local_storage_error" || /winerror 5|permission denied|access is denied|拒绝访问|read-only file system/.test(error)) {
-    return { code: "local_storage", label: "本地数据写入失败" };
-  }
-  if (code === "cancelled") return { code: "cancelled", label: "任务停止" };
-  if (code === "internal_error") return { code: "internal", label: "程序执行异常" };
-  return { code: "other", label: "其他失败" };
-}
-
 export function RegisterCard() {
   const config = useSettingsStore((state) => state.registerConfig);
   const isLoading = useSettingsStore((state) => state.isLoadingRegister);
@@ -73,15 +42,6 @@ export function RegisterCard() {
   const stats = config.stats || { success: 0, fail: 0, done: 0, running: 0, threads: config.threads };
   const logs = config.logs || [];
   const savedAccounts = stats.stored_total ?? stats.registered_total ?? stats.current_available ?? 0;
-  const groupedFailureReasons = Object.values(stats.failure_reasons || {}).reduce<Array<{ code: string; label: string; count: number }>>((groups, item) => {
-    const count = Number(item.count || 0);
-    if (count <= 0) return groups;
-    const group = failureGroup(item);
-    const current = groups.find((entry) => entry.code === group.code);
-    if (current) current.count += count;
-    else groups.push({ ...group, count });
-    return groups;
-  }, []).sort((left, right) => right.count - left.count);
   const statItems = [
     ["成功", stats.success || 0],
     ["失败", stats.fail || 0],
@@ -104,26 +64,6 @@ export function RegisterCard() {
               </div>
             ))}
         </div>
-      </div>
-
-      <div className="shrink-0 border-b border-slate-200 bg-white">
-        <div className="border-b border-slate-100 px-4 py-2.5">
-          <h3 className="text-sm font-semibold text-slate-950">失败原因</h3>
-        </div>
-        {groupedFailureReasons.length === 0 ? (
-          <div className="px-4 py-3 text-xs text-slate-400">
-            {Number(stats.fail || 0) > 0 ? "当前批次暂无分类数据" : "暂无失败"}
-          </div>
-        ) : (
-          <div className="grid max-h-32 grid-cols-2 overflow-y-auto xl:grid-cols-4">
-            {groupedFailureReasons.map((item) => (
-              <div key={item.code} className="flex min-w-0 items-center justify-between gap-3 border-b border-r border-slate-100 px-4 py-3">
-                <span className="min-w-0 text-xs font-medium text-slate-600">{item.label}</span>
-                <span className="shrink-0 text-base font-semibold tabular-nums text-rose-600">{item.count}</span>
-              </div>
-            ))}
-          </div>
-        )}
       </div>
 
       <div className="flex min-h-0 flex-1 flex-col p-4">

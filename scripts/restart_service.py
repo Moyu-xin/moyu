@@ -45,17 +45,7 @@ def main() -> int:
     write("Restart requested.")
     if not run_script("stop_local.ps1", 60):
         return 4
-    write("Waiting for Python process cleanup.")
-    time.sleep(5)
-    started = False
-    for attempt in range(1, 4):
-        if run_script("start_local.ps1", 300):
-            started = True
-            break
-        if attempt < 3:
-            write(f"Start attempt {attempt} failed; retrying after Python process cleanup.")
-            time.sleep(5)
-    if not started:
+    if not run_script("start_local.ps1", 300):
         return 5
     write("Restart completed.")
     return 0

@@ -15,10 +15,6 @@ from services import k12_config_store, task_proxy_service
 from services.account_token_profile import SUB2API_OAUTH_CLIENT_ID, token_profile
 from services.atomic_json_store import read_json, write_json
 from services.config import DATA_DIR
-from services.grok.oauth import CLI_BASE_URL as GROK_CLI_BASE_URL
-from services.grok.oauth import CLI_HEADERS as GROK_CLI_HEADERS
-from services.grok.oauth import GROK_CLI_CLIENT_ID, TOKEN_ENDPOINT as GROK_TOKEN_ENDPOINT
-from services.grok.oauth import exchange_sso_for_oauth
 from services.registered_account_store import account_matches_selector, list_registered_accounts, update_registered_account
 
 SUB2API_CONFIG_FILE = DATA_DIR / "sub2api_config.json"
@@ -411,8 +407,6 @@ def _expires_from_claims(*claims: dict[str, Any]) -> tuple[int | None, int | Non
 
 
 def build_sub2api_account(account: dict[str, Any], cfg: dict[str, Any] | None = None) -> dict[str, Any]:
-    if str(account.get("platform") or "").strip().lower() == "grok":
-        return build_grok_sub2api_account(account, cfg)
     cfg = _normalize(cfg or _load())
     access_claims = _jwt_payload(account.get("access_token"))
     id_claims = _jwt_payload(account.get("id_token"))
@@ -507,49 +501,6 @@ def build_sub2api_account(account: dict[str, Any], cfg: dict[str, Any] | None = 
     return {key: value for key, value in item.items() if value not in (None, [], {})}
 
 
-def build_grok_sub2api_account(account: dict[str, Any], cfg: dict[str, Any] | None = None) -> dict[str, Any]:
-    cfg = _normalize(cfg or _load())
-    access_claims = _jwt_payload(account.get("access_token"))
-    id_claims = _jwt_payload(account.get("id_token"))
-    email = _first_non_empty(account.get("email"), id_claims.get("email"), access_claims.get("email"))
-    subject = _first_non_empty(account.get("subject"), id_claims.get("sub"), access_claims.get("sub"))
-    expires_at = account.get("token_expires_at") or id_claims.get("exp") or access_claims.get("exp")
-    credentials: dict[str, Any] = {
-        "access_token": str(account.get("access_token") or "").strip(),
-        "refresh_token": str(account.get("refresh_token") or "").strip(),
-        "id_token": str(account.get("id_token") or "").strip(),
-        "token_type": str(account.get("token_type") or "Bearer").strip(),
-        "client_id": str(account.get("client_id") or "b1a00492-073a-47ea-816f-4c329264a828").strip(),
-        "scope": str(account.get("scope") or "").strip(),
-        "email": email,
-        "sub": subject,
-        "base_url": str(account.get("base_url") or "https://cli-chat-proxy.grok.com/v1").strip(),
-    }
-    if expires_at:
-        try:
-            credentials["expires_at"] = datetime.fromtimestamp(int(expires_at), timezone.utc).isoformat()
-        except Exception:
-            credentials["expires_at"] = str(expires_at)
-    headers = account.get("headers")
-    if isinstance(headers, dict) and headers:
-        credentials["headers"] = headers
-    item: dict[str, Any] = {
-        "name": email or "Grok OAuth Account",
-        "notes": str(cfg.get("notes") or "").strip() or None,
-        "platform": "grok",
-        "type": "oauth",
-        "credentials": {key: value for key, value in credentials.items() if value not in ("", None)},
-        "extra": {"source": "chatgpt2api-local", "email": email},
-        "concurrency": int(cfg.get("concurrency") or 10),
-        "priority": int(cfg.get("priority") or 1),
-        "rate_multiplier": float(cfg.get("rate_multiplier") or 1.0),
-        "load_factor": int(cfg.get("load_factor") or cfg.get("concurrency") or 10),
-        "group_ids": _as_int_list(cfg.get("group_ids")),
-        "auto_pause_on_expired": bool(cfg.get("auto_pause_on_expired", True)),
-    }
-    return {key: value for key, value in item.items() if value not in (None, [], {})}
-
-
 def build_sub2api_document(accounts: list[dict[str, Any]], cfg: dict[str, Any] | None = None) -> dict[str, Any]:
     cfg = _normalize(cfg or _load())
     return {
@@ -561,300 +512,12 @@ def build_sub2api_document(accounts: list[dict[str, Any]], cfg: dict[str, Any] |
     }
 
 
-def _select_accounts(emails: list[str] | None = None, *, include_grok_sso: bool = False) -> list[dict[str, Any]]:
+def _select_accounts(emails: list[str] | None = None) -> list[dict[str, Any]]:
     selected = {str(item).strip().lower() for item in emails or [] if str(item).strip()}
     accounts = list_registered_accounts(include_secret=True)
     if selected:
         accounts = [item for item in accounts if any(account_matches_selector(item, selector) for selector in selected)]
-    selected_accounts: list[dict[str, Any]] = []
-    for item in accounts:
-        profile = token_profile(item)
-        if profile.get("oauth_capable"):
-            selected_accounts.append(item)
-            continue
-        if (
-            include_grok_sso
-            and str(item.get("platform") or "openai").strip().lower() == "grok"
-            and bool(str(item.get("sso_token") or item.get("sso") or "").strip())
-        ):
-            selected_accounts.append(item)
-    return selected_accounts
-
-
-def refresh_grok_account_oauth(
-    account: dict[str, Any],
-    *,
-    force_reauthorize: bool = False,
-    task_index: int = 1,
-    total_threads: int = 1,
-) -> dict[str, Any]:
-    if str(account.get("platform") or "").strip().lower() != "grok":
-        raise RuntimeError("账号不是 Grok 账号")
-    sso_token = str(account.get("sso_token") or account.get("sso") or "").strip()
-    assignment = task_proxy_service.assign_task_proxy(
-        task_index,
-        purpose="grok_oauth_reauthorize",
-        target_url="https://accounts.x.ai/",
-        account=None,
-        total_threads=max(1, int(total_threads or 1)),
-        slot_index=max(0, int(task_index or 1) - 1) % max(1, int(total_threads or 1)),
-    )
-    if assignment.get("sticky_failure") or assignment.get("managed_failure"):
-        raise RuntimeError(str(assignment.get("error") or "Grok OAuth 代理分配失败"))
-    proxy = str(assignment.get("proxy") or "").strip()
-    token: dict[str, Any] = {}
-    refresh_error = ""
-    method = "refresh_token"
-
-    if not force_reauthorize and str(account.get("refresh_token") or "").strip():
-        try:
-            from services.account_inventory_service import _grok_refresh_tokens
-
-            token = _grok_refresh_tokens(account, proxy=proxy)
-        except Exception as error:
-            refresh_error = str(error)
-
-    if not token:
-        if not sso_token:
-            detail = f"；原 RT 刷新失败：{refresh_error}" if refresh_error else ""
-            raise RuntimeError(f"账号没有可用于重新授权的 xAI SSO{detail}")
-        method = "sso_reauthorize"
-        try:
-            token = exchange_sso_for_oauth(sso_token, proxy=proxy, timeout=60.0)
-        except Exception as error:
-            detail = f"；原 RT 刷新失败：{refresh_error}" if refresh_error else ""
-            raise RuntimeError(f"Grok SSO 重新授权失败：{error}{detail}") from error
-
-    access_token = str(token.get("access_token") or "").strip()
-    refresh_token = str(token.get("refresh_token") or account.get("refresh_token") or "").strip()
-    if not access_token or not refresh_token:
-        raise RuntimeError("Grok OAuth 未返回完整的 access_token/refresh_token")
-    try:
-        expires_in = max(0, int(token.get("expires_in") or token.get("token_expires_in") or 21600))
-    except Exception:
-        expires_in = 21600
-    try:
-        expires_at = int(token.get("expires_at") or token.get("token_expires_at") or 0)
-    except Exception:
-        expires_at = 0
-    if not expires_at and expires_in:
-        expires_at = int(time.time()) + expires_in
-    updates: dict[str, Any] = {
-        "access_token": access_token,
-        "refresh_token": refresh_token,
-        "id_token": str(token.get("id_token") or account.get("id_token") or "").strip(),
-        "token_type": str(token.get("token_type") or account.get("token_type") or "Bearer").strip(),
-        "client_id": str(token.get("client_id") or account.get("client_id") or GROK_CLI_CLIENT_ID).strip(),
-        "scope": str(token.get("scope") or account.get("scope") or "").strip(),
-        "subject": str(token.get("sub") or token.get("subject") or account.get("subject") or "").strip(),
-        "token_endpoint": str(token.get("token_endpoint") or account.get("token_endpoint") or GROK_TOKEN_ENDPOINT).strip(),
-        "base_url": str(token.get("base_url") or account.get("base_url") or GROK_CLI_BASE_URL).strip(),
-        "headers": token.get("headers") if isinstance(token.get("headers"), dict) else (account.get("headers") if isinstance(account.get("headers"), dict) else dict(GROK_CLI_HEADERS)),
-        "token_expires_at": expires_at,
-        "token_expires_in": expires_in,
-        "token_source": "grok_sso_reauthorized" if method == "sso_reauthorize" else "grok_refresh_token",
-        "oauth_provenance": "grok_local_sso" if method == "sso_reauthorize" else "grok_local_refresh",
-        "oauth_status": "ready",
-        "oauth_refresh_status": "ok",
-        "oauth_refresh_error": "",
-        "oauth_refreshed_at": _now(),
-        "token_refresh_required": False,
-        "status": "active",
-        "plan_type": "grok",
-    }
-    updated = update_registered_account(account, updates)
-    if not updated:
-        raise RuntimeError("Grok OAuth 已获取，但本地账号更新失败")
-    return {
-        "account": updated,
-        "method": method,
-        "proxy": proxy,
-        "proxy_source": str(assignment.get("source") or ""),
-        "proxy_label": str(assignment.get("label") or ""),
-        "refresh_error": refresh_error,
-    }
-
-
-def _create_grok_account_in_sub2api(
-    account: dict[str, Any],
-    session: requests.Session,
-    api_base: str,
-    token: str,
-    cfg: dict[str, Any],
-) -> dict[str, Any]:
-    headers = _admin_auth_headers(cfg, token, content_type="application/json", accept="application/json")
-    sso_token = str(account.get("sso_token") or account.get("sso") or "").strip()
-    has_oauth = bool(
-        str(account.get("access_token") or "").strip()
-        and str(account.get("refresh_token") or "").strip()
-    )
-    group_ids = _as_int_list(cfg.get("group_ids"))
-    if sso_token and not has_oauth:
-        payload: dict[str, Any] = {
-            "sso_tokens": [sso_token],
-            "name": str(account.get("email") or "Grok OAuth Account").strip(),
-            "group_ids": group_ids,
-            "concurrency": int(cfg.get("concurrency") or 10),
-            "priority": int(cfg.get("priority") or 1),
-            "rate_multiplier": float(cfg.get("rate_multiplier") or 1.0),
-            "load_factor": int(cfg.get("load_factor") or cfg.get("concurrency") or 10),
-            "auto_pause_on_expired": bool(cfg.get("auto_pause_on_expired", True)),
-            "extra": {"source": "chatgpt2api-local", "email": str(account.get("email") or "")},
-        }
-        base_url = str(account.get("base_url") or "").strip()
-        if base_url:
-            payload["credentials"] = {"base_url": base_url}
-        url = f"{api_base}/admin/grok/sso-to-oauth"
-        response = session.post(url, json=payload, headers=headers, timeout=120, verify=_verify_tls(cfg))
-        data = _json_response(response)
-        body = _extract_data(data)
-        created = body.get("created") if isinstance(body, dict) and isinstance(body.get("created"), list) else []
-        failed = body.get("failed") if isinstance(body, dict) and isinstance(body.get("failed"), list) else []
-        account_id = _extract_account_id_from_response({"created": created})
-        ok = 200 <= int(response.status_code) < 300 and bool(created) and not failed
-        return {
-            "ok": ok,
-            "method": "grok_sso_to_oauth",
-            "status_code": int(response.status_code),
-            "response": data,
-            "url": url,
-            "account_id": account_id,
-            "error": str((failed[0] or {}).get("error") or "") if failed and isinstance(failed[0], dict) else "",
-        }
-
-    payload = build_grok_sub2api_account(account, cfg)
-    if not payload.get("credentials", {}).get("access_token"):
-        return {"ok": False, "method": "grok_missing_credentials", "status_code": 0, "error": "missing Grok sso/access_token"}
-
-    existing_id: int | None = None
-    try:
-        raw_existing_id = account.get("sub2api_account_id")
-        existing_id = int(raw_existing_id) if raw_existing_id not in (None, "") else None
-    except (TypeError, ValueError):
-        existing_id = None
-
-    if not existing_id:
-        email = str(account.get("email") or "").strip()
-        if email:
-            try:
-                lookup = session.get(
-                    f"{api_base}/admin/accounts",
-                    params={"page": 1, "page_size": 100, "platform": "grok", "type": "oauth", "search": email},
-                    headers=_admin_auth_headers(cfg, token, content_type="", accept="application/json"),
-                    timeout=30,
-                    verify=_verify_tls(cfg),
-                )
-                if int(lookup.status_code) == 200:
-                    items, _total = _extract_account_items(_json_response(lookup))
-                    matching_ids = []
-                    for item in items:
-                        if str(item.get("platform") or "").strip().lower() != "grok":
-                            continue
-                        if str(item.get("name") or "").strip().lower() != email.lower():
-                            continue
-                        try:
-                            matching_ids.append(int(item.get("id") or item.get("account_id")))
-                        except (TypeError, ValueError):
-                            pass
-                    if matching_ids:
-                        existing_id = max(matching_ids)
-            except Exception:
-                pass
-
-    if existing_id:
-        update_payload = dict(payload)
-        update_payload.pop("platform", None)
-        url = f"{api_base}/admin/accounts/{existing_id}"
-        response = session.put(
-            url,
-            json=update_payload,
-            headers=headers,
-            timeout=30,
-            verify=_verify_tls(cfg),
-        )
-        data = _json_response(response)
-        if 200 <= int(response.status_code) < 300:
-            return {
-                "ok": True,
-                "method": "grok_oauth_update",
-                "status_code": int(response.status_code),
-                "response": data,
-                "url": url,
-                "account_id": existing_id,
-            }
-        if int(response.status_code) != 404:
-            return {
-                "ok": False,
-                "method": "grok_oauth_update",
-                "status_code": int(response.status_code),
-                "response": data,
-                "url": url,
-                "account_id": existing_id,
-            }
-
-    url = f"{api_base}/admin/accounts"
-    response = session.post(
-        url,
-        json=payload,
-        headers=headers,
-        timeout=30,
-        verify=_verify_tls(cfg),
-    )
-    data = _json_response(response)
-    account_id = _extract_account_id_from_response(data)
-    if 200 <= int(response.status_code) < 300 and account_id:
-        return {
-            "ok": True,
-            "method": "grok_oauth_create",
-            "status_code": int(response.status_code),
-            "response": data,
-            "url": url,
-            "account_id": account_id,
-        }
-
-    # Older sub2api builds may not expose the generic account-create route.
-    # Its data-import endpoint reports failures inside a HTTP 200 response, so
-    # validate the business counters instead of treating every 2xx as success.
-    if int(response.status_code) not in (404, 405):
-        return {
-            "ok": False,
-            "method": "grok_oauth_create",
-            "status_code": int(response.status_code),
-            "response": data,
-            "url": url,
-            "account_id": account_id,
-            "error": "sub2api did not return a created Grok account id",
-        }
-
-    url = f"{api_base}/admin/accounts/data"
-    response = session.post(
-        url,
-        json={
-            "data": {"type": "sub2api-data", "version": 1, "exported_at": _now(), "proxies": [], "accounts": [payload]},
-            "skip_default_group_bind": not bool(group_ids),
-        },
-        headers=headers,
-        timeout=60,
-        verify=_verify_tls(cfg),
-    )
-    data = _json_response(response)
-    body = _extract_data(data)
-    body = body if isinstance(body, dict) else {}
-    created = int(body.get("account_created") or 0)
-    failed = int(body.get("account_failed") or 0)
-    errors = body.get("errors") if isinstance(body.get("errors"), list) else []
-    error = ""
-    if errors and isinstance(errors[0], dict):
-        error = str(errors[0].get("message") or errors[0].get("error") or "")
-    return {
-        "ok": 200 <= int(response.status_code) < 300 and created > 0 and failed == 0,
-        "method": "grok_data_import",
-        "status_code": int(response.status_code),
-        "response": data,
-        "url": url,
-        "account_id": _extract_account_id_from_response(data),
-        "error": error or ("sub2api did not create the Grok account" if created <= 0 else ""),
-    }
+    return [item for item in accounts if token_profile(item).get("oauth_capable")]
 
 
 def _build_oauth_create_payload(account: dict[str, Any], cfg: dict[str, Any]) -> dict[str, Any]:
@@ -939,8 +602,6 @@ def create_account_in_sub2api(
     *,
     allow_access_token_fallback: bool = False,
 ) -> dict[str, Any]:
-    if str(account.get("platform") or "").strip().lower() == "grok":
-        return _create_grok_account_in_sub2api(account, session, api_base, token, cfg)
     profile = token_profile(account)
     oauth_capable = bool(profile.get("oauth_capable"))
     if not oauth_capable and not (allow_access_token_fallback and str(account.get("access_token") or "").strip()):
@@ -1046,11 +707,11 @@ def export_account_dicts_to_sub2api(accounts: list[dict[str, Any]] | dict[str, A
     return {"count": len(selected), "data": build_sub2api_document(selected, cfg)}
 
 
-def import_accounts_to_sub2api(emails: list[str] | None = None, *, reauthorize_grok: bool = False) -> dict[str, Any]:
+def import_accounts_to_sub2api(emails: list[str] | None = None) -> dict[str, Any]:
     with _lock:
         cfg = _load()
-    accounts = _select_accounts(emails, include_grok_sso=reauthorize_grok)
-    return _import_account_list_to_sub2api(accounts, cfg, reauthorize_grok=reauthorize_grok)
+    accounts = _select_accounts(emails)
+    return _import_account_list_to_sub2api(accounts, cfg)
 
 
 def import_account_dicts_to_sub2api(
@@ -1068,29 +729,17 @@ def import_account_dicts_to_sub2api(
         selected_accounts = [accounts]
     else:
         selected_accounts = [item for item in accounts if isinstance(item, dict)]
-    selected_accounts = [
-        item
-        for item in selected_accounts
-        if str(item.get("access_token") or item.get("sso_token") or item.get("sso") or "").strip()
-    ]
+    selected_accounts = [item for item in selected_accounts if str(item.get("access_token") or "").strip()]
     return _import_account_list_to_sub2api(selected_accounts, cfg, allow_access_token_fallback=allow_access_token_fallback)
 
 
-def _import_account_list_to_sub2api(
-    accounts: list[dict[str, Any]],
-    cfg: dict[str, Any],
-    *,
-    allow_access_token_fallback: bool = False,
-    reauthorize_grok: bool = False,
-) -> dict[str, Any]:
+def _import_account_list_to_sub2api(accounts: list[dict[str, Any]], cfg: dict[str, Any], *, allow_access_token_fallback: bool = False) -> dict[str, Any]:
     if not cfg.get("enabled"):
         raise RuntimeError("请先在“中转仓库配置”中启用 sub2api")
     api_base = _api_base(str(cfg.get("base_url") or ""))
     if not api_base:
         raise RuntimeError("请先填写 sub2api 地址")
     if not accounts:
-        if reauthorize_grok:
-            raise RuntimeError("当前选择中没有可用 xAI SSO 的 Grok 账号")
         raise RuntimeError("当前选择中没有通过 sub2api 授权登录得到的 OAuth Token；请先执行“获取 OAuth 并导入”")
 
     session = _session(cfg=cfg, purpose="sub2api_admin")
@@ -1099,21 +748,10 @@ def _import_account_list_to_sub2api(
 
     def import_one(item: tuple[int, dict[str, Any]]) -> dict[str, Any]:
         index, account = item
-        prepared_account = account
-        reauthorize_method = ""
         try:
-            if reauthorize_grok and str(account.get("platform") or "").strip().lower() == "grok":
-                refreshed = refresh_grok_account_oauth(
-                    account,
-                    force_reauthorize=True,
-                    task_index=index,
-                    total_threads=workers,
-                )
-                prepared_account = refreshed["account"]
-                reauthorize_method = str(refreshed.get("method") or "")
             result = create_account_in_sub2api(
-                prepared_account,
-                _session(cfg=cfg, purpose="sub2api_import", index=index, account=prepared_account, total_threads=workers),
+                account,
+                _session(cfg=cfg, purpose="sub2api_import", index=index, account=account, total_threads=workers),
                 api_base,
                 token,
                 cfg,
@@ -1132,8 +770,6 @@ def _import_account_list_to_sub2api(
             "account_id": account_id,
             "status_code": int(result.get("status_code") or 0),
             "error": str(result.get("response") or result.get("error") or result.get("status_code") or "") if not result.get("ok") else "",
-            "method": str(result.get("method") or ""),
-            "reauthorize_method": reauthorize_method,
         }
 
     workers = max(1, min(len(accounts), int(cfg.get("concurrency") or 10), 50))
