@@ -8,12 +8,13 @@
 
 如本项目中的内容涉及第三方权益，请通过仓库 Issue 联系处理。
 
-交流群：1062966376
-# 摸鱼机 Moyu 1.0
+# 摸鱼机 Moyu 2.0
 纯AI
 摸鱼机是一套本地优先的注册任务与账号库存管理面板，集中管理邮箱、代理、注册任务、成品/半成品账号、OAuth、K12、Plus 提链和中转仓库。系统设置提供实时资源监控、内存预测、登录密钥热更新、日志缓存清理、Git 快进更新与本地项目重启。
 
-> 默认仅监听 `127.0.0.1:8000`。首次登录密钥为 `moyu666`，登录后请在“系统设置”中更换。
+交流群：1062966376
+
+> 默认仅监听 `127.0.0.1:8000`。Windows 首次安装会生成随机管理密钥；Docker 首次启动须通过环境变量提供至少 16 位的随机密钥。
 
 ## 主要功能
 
@@ -26,18 +27,6 @@
 - Plus/K12/仓库：批量任务、状态追踪和失败原因记录。
 - 系统设置：密钥热更新、内存监控与预测、日志缓存清理、一键重置、安全 Git 更新。
 - 部署维护：Windows 单命令首次启动、Docker Compose 服务器部署、干净发布包生成和 CI。
-### 部分截图
-<img width="2549" height="1403" alt="image" src="https://github.com/user-attachments/assets/95bcbb09-914d-4de5-90be-4d87c9d8a3e9" />
-
-<img width="2549" height="1403" alt="image" src="https://github.com/user-attachments/assets/f84904e4-419f-4b59-b964-79b3de0e2ec9" />
-
-<img width="2549" height="1403" alt="image" src="https://github.com/user-attachments/assets/f85ab202-58b3-4550-9b00-37cde2dccecb" />
-
-<img width="2549" height="1403" alt="image" src="https://github.com/user-attachments/assets/e3c52f26-146c-4304-9b32-65ce4af7988d" />
-
-
-
-
 ## 快速开始
 
 ### Windows 本地
@@ -72,7 +61,7 @@ sh deploy_server.sh
 
 ## 首次配置顺序
 
-1. 使用 `moyu666` 登录，立即在“系统设置”更换密钥。
+1. 使用安装脚本输出的随机管理密钥登录；Docker 使用部署时设置的 `CHATGPT2API_INITIAL_AUTH_KEY`。
 2. 在“邮箱”中配置邮箱来源、凭据和库存分组。
 3. 在“代理配置”中添加订阅或节点并完成连通性检测。
 4. 在“注册”中选择注册模式、产物类型、邮箱分组与并发数。
@@ -82,12 +71,14 @@ sh deploy_server.sh
 
 ## 数据与安全
 
-- 运行数据：`data/`，Docker 部署为 `runtime/data/`。
+- 运行数据：默认写入 `data/moyu.sqlite3`，Docker 部署为 `runtime/data/moyu.sqlite3`。
+- 第一次启用 SQLite 时会自动迁移现有 `data/*.json`，并为每个迁移源保留 `*.pre-sqlite.bak`；旧 JSON 不再作为写入目标。
 - 登录配置：`config.json`，Docker 部署为 `runtime/config.json`。
 - 日志：`logs/`，Docker 部署为 `runtime/logs/`。
 - 上述目录均被 Git 与干净发布脚本排除。
 - Git 更新仅执行 `fetch` 和 `merge --ff-only`；工作区有未提交修改时会拒绝更新。
 - 一键重置只恢复系统监控参数，保留密钥、账号、邮箱与代理库存。
+- 系统设置的概览接口会返回当前存储后端、数据库大小、文档数和库存行数。
 
 安全边界和公开部署要求见 [SECURITY.md](SECURITY.md)，使用边界见 [DISCLAIMER.md](DISCLAIMER.md)。
 
@@ -111,6 +102,12 @@ corepack pnpm build
 
 维护与发版流程见 [MAINTENANCE.md](MAINTENANCE.md)，贡献规则见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
+## 部分截图
+
+![Moyu 2.0 控制台](docs/screenshots/moyu-2.0-dashboard.jpg)
+![Moyu 2.0 邮箱库存](docs/screenshots/moyu-2.0-mailboxes.jpg)
+![Moyu 2.0 账号库存](docs/screenshots/moyu-2.0-accounts.jpg)
+
 ## 参考项目
 
 - [basketikun/chatgpt2api](https://github.com/basketikun/chatgpt2api)
@@ -128,7 +125,7 @@ corepack pnpm build
 
 ## 赞助
 
-暂无，联系方式qq:1553622195
+暂无。
 
 ## 许可证
 
