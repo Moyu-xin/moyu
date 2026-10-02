@@ -7,7 +7,7 @@ COPY VERSION ./VERSION
 COPY web ./web
 RUN cd web && pnpm build
 
-FROM python:3.13-slim-bookworm AS runtime
+FROM python:3.14-slim-bookworm AS runtime
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     STORAGE_BACKEND=json \
